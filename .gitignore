@@ -1,0 +1,20 @@
+node_modules/
+.env
+.env.local
+dist/
+build/
+coverage/
+*.log
+.DS_Store
+out/
+artifacts/
+!artifacts/.gitkeep
+
+# data/ is deliberately NOT ignored.
+#
+# The seeded worlds (~2MB of pretty-printed JSON) are committed on purpose. A seeded
+# generator is reproducible in principle; a committed artefact is reproducible in
+# practice. It means anyone can open the exact population behind every number in the
+# README — including data/*.truth.json, the answer key, which is the part they should
+# check hardest. It also closes the gap where I tweak the generator, regenerate a
+# slightly different world, and never notice the headline figures moved.

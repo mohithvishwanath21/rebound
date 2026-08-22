@@ -1,0 +1,25 @@
+{
+  "name": "rebound",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "An expected-value revenue recovery agent for Razorpay merchants. Decides which at-risk rupees are worth chasing, how, when, and when to stop.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "seed": "node src/sim/cli/seed.js",
+    "describe-sim": "node src/sim/cli/describe.js",
+    "verify-sim": "node src/sim/cli/verify.js",
+    "api": "node src/api/server.js",
+    "eval": "node src/eval/cli/run.js",
+    "test": "node --test test/*.test.js",
+    "check": "npm run test && npm run verify-sim"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mongoose": "^8.5.0",
+    "razorpay": "^2.9.4"
+  }
+}
