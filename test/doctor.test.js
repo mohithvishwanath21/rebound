@@ -129,6 +129,19 @@ test('a truncated secret is flagged by length', () => {
   assert.match(found.detail, /most common cause of a 401/);
 });
 
+/**
+ * The real one, from 2026-08-22: a key id two characters short of 23, which produced a 401 with
+ * nothing else visibly wrong. Pinned as a test because it is the case this command exists for.
+ */
+test('a key id two characters short is flagged, and the advice is how to re-copy it', () => {
+  // 'rzp_test_' (9) + 12 body chars = 21, i.e. two short of the usual 23.
+  const { results } = runDoctor({ keyId: 'rzp_test_29QrsTuVwXyZ', keySecret: GOOD_SECRET });
+  const found = results.find((r) => r.label.startsWith('key id length'));
+  assert.equal(found.label, 'key id length 21');
+  assert.equal(found.level.trim(), 'HMM');
+  assert.match(found.detail, /COPY BUTTON/, 'the advice has to be the fix, not just the observation');
+});
+
 test('a live key is refused with the reason, not merely warned about', () => {
   const { results } = runDoctor({ keyId: 'rzp_live_29QrsTuVwXyZ01', keySecret: GOOD_SECRET });
   const found = results.find((r) => r.label.includes('LIVE key'));

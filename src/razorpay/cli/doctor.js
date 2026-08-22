@@ -103,18 +103,32 @@ function findings(keyId, keySecret) {
   }
 
   // ---- lengths, the highest-signal check that reveals nothing ----
+  //
+  // This is the check that actually earned its keep. The first real 401 on this project was a
+  // key id two characters short — a double-click selection in the dashboard that stopped at a
+  // character it treated as a word boundary. Nothing else about the value looked wrong, and no
+  // error message anywhere would ever have said so.
   const idNote = id.length === TYPICAL_ID_LENGTH ? PASS : WARN;
   add(
     idNote,
     `key id length ${id.length}`,
-    id.length === TYPICAL_ID_LENGTH ? '' : `test key ids are usually ${TYPICAL_ID_LENGTH} characters — a short one means a truncated paste`
+    id.length === TYPICAL_ID_LENGTH
+      ? ''
+      : `test key ids are usually ${TYPICAL_ID_LENGTH} characters (rzp_test_ plus 14). ` +
+        'Open the dashboard and use its COPY BUTTON rather than selecting the text — a ' +
+        'double-click selection often stops short. Then re-run this command and check the ' +
+        'length again before trying live-check.'
   );
 
   const secNote = sec.length === TYPICAL_SECRET_LENGTH ? PASS : WARN;
   add(
     secNote,
     `secret length ${sec.length}`,
-    sec.length === TYPICAL_SECRET_LENGTH ? '' : `secrets are usually ${TYPICAL_SECRET_LENGTH} characters — this is the most common cause of a 401`
+    sec.length === TYPICAL_SECRET_LENGTH
+      ? ''
+      : `secrets are usually ${TYPICAL_SECRET_LENGTH} characters — a short one is the most ` +
+        'common cause of a 401, and the secret cannot be re-read from the dashboard, so a ' +
+        'bad paste means generating a fresh pair.'
   );
 
   // ---- paste damage ----
