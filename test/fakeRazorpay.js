@@ -65,13 +65,29 @@ export function createFakeRazorpay({ now = () => new Date() } = {}) {
       return json(400, errorBody('BAD_REQUEST_ERROR', 'reference_id may not be greater than 40 characters', { field: 'reference_id' }));
     }
     // Razorpay enforces this. It is the remote half of the idempotency guarantee.
+    //
+    // The wording and the null fields below are copied verbatim from a real 2026-08-22
+    // response, and both corrections matter:
+    //
+    //   1. It is `reference_id` with an underscore, and the offending value is interpolated
+    //      into the sentence. I had written "the given reference id" from memory, and my
+    //      matcher was tuned to my wording rather than Razorpay's.
+    //   2. Razorpay sends `reason: null` and `field: null`. My fake used to supply
+    //      `reason: 'duplicate_reference_id'`, which made `isDuplicateReference` short-circuit
+    //      on the reason code and never reach the string match — so the only branch that
+    //      actually runs against the real API had no offline coverage at all.
+    //
+    // Do not "improve" this fixture. A fake that is kinder than the real thing is worse than
+    // no fake, because it converts an unverified belief into a passing test.
     if (byReference.has(body.reference_id)) {
       return json(
         400,
-        errorBody('BAD_REQUEST_ERROR', 'Payment link with the given reference id already exists', {
-          reason: 'duplicate_reference_id',
-          field: 'reference_id',
-        })
+        errorBody(
+          'BAD_REQUEST_ERROR',
+          `payment link with given reference_id: ${body.reference_id} already exists. ` +
+            'Please create a payment link with a different reference_id',
+          { reason: null, field: null }
+        )
       );
     }
     if (body.upi_link && body.accept_partial) {
@@ -176,11 +192,17 @@ export function createFakeRazorpay({ now = () => new Date() } = {}) {
     if (method === 'POST' && path === '/payment_links') {
       if (faults.duplicateNext) {
         faults.duplicateNext = false;
+        // Same real shape as createLink's own collision: real wording, no reason code. This
+        // fault injects a duplicate refusal for a reference the fake has NOT stored, which is
+        // how the DUPLICATE_NOT_FOUND path gets exercised.
         return json(
           400,
-          errorBody('BAD_REQUEST_ERROR', 'Payment link with the given reference id already exists', {
-            reason: 'duplicate_reference_id',
-          })
+          errorBody(
+            'BAD_REQUEST_ERROR',
+            `payment link with given reference_id: ${body?.reference_id} already exists. ` +
+              'Please create a payment link with a different reference_id',
+            { reason: null, field: null }
+          )
         );
       }
       return createLink(body);

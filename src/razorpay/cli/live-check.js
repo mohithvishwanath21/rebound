@@ -180,16 +180,46 @@ async function checkUniqueReference(ctx) {
 
   // The same decision, replayed. Razorpay must refuse it, and the gateway must turn that
   // refusal into a receipt for the link that already exists.
+  //
+  // Two SEPARATE beliefs hide in that sentence, and the first version of this check reported
+  // them as one — which meant a working uniqueness guarantee plus a failed lookup printed
+  // "idempotency is NOT provided remotely", a false statement about Razorpay. Same mistake as
+  // `idempotent` vs `safeToRetry`: one label over two properties. So they are recorded apart.
+  //
+  //   B1  — Razorpay refuses the duplicate.               (their behaviour)
+  //   B1b — we can then find the link it refused to duplicate. (our lookup, GET ?reference_id=)
+  //
+  // B1 is the load-bearing one: without it there is no remote idempotency and the whole
+  // replay story collapses. B1b failing is recoverable — the receipt is UNKNOWN rather than
+  // wrong, which is the correct thing to do with an outcome we cannot confirm.
   const second = await gw.sendPaymentLink(req);
-  const isReplay = second.replayed === true && second.providerRef === first.providerRef;
+
+  const madeASecondLink = second.state === ReceiptState.SENT && second.providerRef !== first.providerRef;
+  const refusedAsDuplicate = !madeASecondLink;
+  const resolvedToSameLink = second.replayed === true && second.providerRef === first.providerRef;
+
   ledger.record({
     id: 'B1',
     belief: 'Razorpay REJECTS a duplicate reference_id on payment links',
-    held: isReplay,
-    detail: isReplay
-      ? `replay resolved to the same link ${second.providerRef}`
-      : `created a SECOND link ${second.providerRef} for the same reference — idempotency is NOT provided remotely`,
+    held: refusedAsDuplicate,
+    detail: madeASecondLink
+      ? `created a SECOND link ${second.providerRef} for the same reference — idempotency is NOT provided remotely, ` +
+        'and every replay-safety claim in this project depends on it'
+      : `the duplicate was refused (receipt state=${second.state})`,
     fatal: true,
+  });
+
+  ledger.record({
+    id: 'B1b',
+    belief: 'after a refusal we can locate the existing link by reference_id',
+    held: resolvedToSameLink,
+    detail: resolvedToSameLink
+      ? `replay resolved to the same link ${second.providerRef}`
+      : `refused, but the lookup did not resolve it: state=${second.state} code=${second.errorCode ?? 'none'}. ` +
+        'GET /payment_links?reference_id= may not filter — if so the reconcile path needs a different join.',
+    // Deliberately not fatal. An UNKNOWN receipt is a correct response to an unconfirmable
+    // outcome; it degrades reconciliation, it does not make a recovery number wrong.
+    fatal: false,
   });
 
   return { first, second };

@@ -93,9 +93,40 @@ test('the whole command runs end to end and exits 0', async () => {
 
 test('every load-bearing belief is actually checked, not just the easy ones', async () => {
   const { results } = await runCli();
-  for (const id of ['REDACT', 'AUTH', 'CREATE', 'B1', 'B2', 'B3a', 'B3b', 'JOIN', 'RETRY_HONEST']) {
+  for (const id of ['REDACT', 'AUTH', 'CREATE', 'B1', 'B1b', 'B2', 'B3a', 'B3b', 'JOIN', 'RETRY_HONEST']) {
     assert.ok(byId(results, id), `check ${id} did not run`);
   }
+});
+
+/**
+ * B1 and B1b were one check until the first real run, and merging them produced a sentence
+ * that was simply false: a refused duplicate whose lookup failed printed "idempotency is NOT
+ * provided remotely", which is a claim about Razorpay contradicted by the very response being
+ * reported. They stay split, and only the provider-behaviour half is fatal.
+ */
+test('a refused duplicate that cannot be located fails B1b but not B1', async () => {
+  const fake = createFakeRazorpay();
+  const noLookup = {
+    ...fake,
+    fetchImpl: async (url, init) => {
+      const u = new URL(url);
+      // Uniqueness still enforced; the reference_id filter simply returns nothing, which is
+      // the world where GET /payment_links?reference_id= does not filter the way I assume.
+      if ((init?.method ?? 'GET') === 'GET' && u.pathname.endsWith('/payment_links') && u.searchParams.get('reference_id')) {
+        return { ok: true, status: 200, headers: new Map(), json: async () => ({ count: 0, entity: 'collection', items: [] }), text: async () => '{"count":0,"items":[]}' };
+      }
+      return fake.fetchImpl(url, init);
+    },
+  };
+
+  const { results } = await runCli({ fake: noLookup });
+  assert.equal(byId(results, 'B1').held, true, 'Razorpay DID refuse the duplicate — that belief holds');
+  assert.equal(byId(results, 'B1b').held, false, 'but the lookup did not resolve it');
+  assert.match(byId(results, 'B1').detail, /refused/);
+  assert.ok(
+    !byId(results, 'B1').detail.includes('NOT provided remotely'),
+    'the old merged check said this, and it was false'
+  );
 });
 
 /**

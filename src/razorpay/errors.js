@@ -158,12 +158,41 @@ export function errorFromResponse({ status, body, headers = {}, requestId = null
   return new RazorpayProtocolError(label, base);
 }
 
-/** Split out so the string-matching heuristic is testable on its own. */
+/**
+ * Split out so the string-matching heuristic is testable on its own.
+ *
+ * THE BUG THIS FUNCTION SHIPPED WITH, and the reason it is now written defensively.
+ *
+ * My fake said  "Payment link with the given reference id already exists"
+ * Razorpay says "payment link with given reference_id: rbd_… already exists. Please create
+ *                a payment link with a different reference_id"
+ *
+ * `reference id` with a space versus `reference_id` with an underscore. The rule I believed
+ * in was correct — Razorpay really does enforce uniqueness — but I had written the wording
+ * from memory, my fake echoed my wording, and the matcher was tuned to the fake. Every
+ * offline test passed. The first real request turned an expected idempotent replay into a
+ * hard failure, because `includes('reference id')` is false for the real message.
+ *
+ * That is the failure mode a fake cannot catch by construction: it encodes my belief, so
+ * when the belief is wrong the fake is wrong in the same direction and agrees with me.
+ *
+ * So: normalise separators before matching, accept either spelling, and require only that
+ * the words appear in any order rather than as a contiguous phrase. The fallback is still
+ * safe — a missed detection surfaces as a visible error, never as a second charge — but
+ * "safe when it fails" is not a reason to be careless about whether it fires.
+ */
 export function isDuplicateReference({ reason, description }) {
   if (reason === 'duplicate_reference_id') return true;
   if (typeof description !== 'string') return false;
-  const d = description.toLowerCase();
-  return d.includes('reference id') && (d.includes('already') || d.includes('exists') || d.includes('duplicate'));
+
+  // Underscores, hyphens and punctuation all become spaces, so `reference_id`,
+  // `reference-id` and `reference id:` are one thing as far as this matcher is concerned.
+  const d = description.toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+
+  const namesTheField = d.includes('reference id') || d.includes('referenceid');
+  const saysCollision = d.includes('already exists') || d.includes('already exist') || d.includes('duplicate');
+
+  return namesTheField && saysCollision;
 }
 
 /**

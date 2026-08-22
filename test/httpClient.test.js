@@ -137,6 +137,28 @@ test('maps each status onto the error type the caller branches on', async () => 
   }
 });
 
+/**
+ * VERBATIM from a real Razorpay test-mode 400 on 2026-08-22. Do not paraphrase it, do not
+ * tidy the underscore into a space, and do not add a `reason` field it never sent. This exact
+ * string is the reason B1 failed on the first real run: my paraphrase said "reference id" with
+ * a space, and the matcher was written against my paraphrase.
+ */
+const REAL_DUPLICATE_DESCRIPTION =
+  'payment link with given reference_id: rbd_SL1_vecheck1_0f12738a7a already exists. ' +
+  'Please create a payment link with a different reference_id';
+
+test('the REAL duplicate message is detected — this is the one that broke in production', async () => {
+  // No `reason` field, exactly as Razorpay sends it, so the string branch is what runs.
+  assert.equal(isDuplicateReference({ reason: null, description: REAL_DUPLICATE_DESCRIPTION }), true);
+
+  const f = scriptedFetch([makeRes(400, ERR('BAD_REQUEST_ERROR', REAL_DUPLICATE_DESCRIPTION))]);
+  await assert.rejects(
+    client(f).post('/payment_links', { body: {} }),
+    RazorpayDuplicateError,
+    'a real duplicate must become RazorpayDuplicateError, or the gateway cannot replay it'
+  );
+});
+
 test('a duplicate reference_id becomes its own error type, not a generic 400', async () => {
   const f = scriptedFetch([
     makeRes(400, ERR('BAD_REQUEST_ERROR', 'Payment link with the given reference id already exists')),
@@ -148,6 +170,9 @@ test('duplicate detection matches the documented reason as well as the prose', (
   assert.equal(isDuplicateReference({ reason: 'duplicate_reference_id' }), true);
   assert.equal(isDuplicateReference({ description: 'Reference id already exists' }), true);
   assert.equal(isDuplicateReference({ description: 'A duplicate reference id was supplied' }), true);
+  // Both spellings, since Razorpay uses the underscore and I originally assumed the space.
+  assert.equal(isDuplicateReference({ description: 'reference_id already exists' }), true);
+  assert.equal(isDuplicateReference({ description: 'REFERENCE_ID: abc already exists.' }), true);
   // Must NOT swallow unrelated validation failures — a false positive here would report a
   // real rejection as a successful replay.
   assert.equal(isDuplicateReference({ description: 'amount must be at least 100' }), false);

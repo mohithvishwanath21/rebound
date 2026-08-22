@@ -347,3 +347,110 @@ measurement meaningful, the sensible thing is to stop. Worth asking of any conve
 if this fires when I didn't intend it to, do I get a wrong answer or a loud one?
 
 ---
+
+## [Day 3] My fake was right about the rule and wrong about the wording, so 15 tests passed over a real bug
+
+**Symptom:** The first real run against Razorpay. Auth confirmed, redaction confirmed against
+the live credential, a real payment link created — then B1, the check the entire idempotency
+story rests on, died:
+
+```
+POST /payment_links 400
+description: "payment link with given reference_id: rbd_SL1_vecheck1_0f12738a7a already exists.
+              Please create a payment link with a different reference_id"
+reason: null   field: null   retryable: false
+live-check failed: RazorpayValidationError
+```
+
+**First hypothesis:** That my belief was wrong and Razorpay does not provide the uniqueness
+guarantee I had built on. That would have been bad — the replay-safety argument for the whole
+executor rests on it.
+
+**Root cause:** The belief was *correct*. Razorpay refused the duplicate, which is exactly what
+I claimed it would do. My **code** failed to recognise the refusal, for two compounding reasons.
+
+First, the wording. My matcher looked for the substring `'reference id'`. Razorpay writes
+`reference_id`, with an underscore. I had written the fake's message from memory:
+
+```
+mine:      "Payment link with the given reference id already exists"
+Razorpay:  "payment link with given reference_id: rbd_… already exists. Please create a …"
+```
+
+Second, and worse: my fake also returned `reason: 'duplicate_reference_id'`. Razorpay returns
+`reason: null`. `isDuplicateReference` checks `reason` first and returns early — so in every
+offline test the function short-circuited on a field the real API never sends, and **the string
+branch, the only branch that runs in production, had zero coverage.** The fake was strictly
+kinder than reality on two axes at once.
+
+This is the failure mode I had written into `test/liveCheck.test.js` as a caveat and then walked
+straight into anyway: a fake encodes my beliefs, so when a belief is wrong the fake is wrong in
+the same direction and cheerfully agrees with me. Not a gap in the test suite — a gap the test
+suite *structurally cannot see*.
+
+**Fix:** Three changes, in increasing order of importance.
+
+1. Normalise before matching: fold all non-alphanumerics to spaces so `reference_id`,
+   `reference-id` and `reference id:` are one thing, and require the field name plus a
+   collision phrase rather than a contiguous quote of someone else's copy.
+2. Correct the fake to Razorpay's verbatim response — real wording, `reason: null`,
+   `field: null` — with a comment telling my future self not to "improve" it. A fake that is
+   kinder than the real thing is worse than no fake, because it converts an unverified belief
+   into a passing test.
+3. Pin the real 400 as a fixture in `test/httpClient.test.js`, so the exact string that broke
+   production is now the thing under test.
+
+Then I measured whether the fix was load-bearing rather than assuming it: I put the original
+buggy matcher back and re-ran. **15 tests fail now, including the whole live-check suite.**
+Before the fake was corrected, those same 15 passed with the bug present. That number is the
+honest measure of what the fixture change bought — it converted 15 decorative tests into 15
+that actually detect this class of error.
+
+**Lesson:** The one I'll carry furthest from this project. Every fake is a *hypothesis* about a
+system you don't control, and a green suite tells you your code agrees with your hypothesis,
+never that your hypothesis is true. Two practices follow. Write fixtures from a captured real
+response, verbatim, never from memory — the paraphrase is where the belief leaks in. And when a
+matcher has a fast path and a slow path, check which one your tests actually take, because a
+convenience field in a fixture can silently exclude the only branch that will ever run for
+real. The reason this cost one command instead of two days is that the live check was built to
+state each result as a claim about *Razorpay* rather than about my code — so the output told me
+the rule held and the parse failed, which is a five-minute fix, instead of just "400".
+
+**Second bug found in the same fix:** B1 was reporting two beliefs under one label — "Razorpay
+refuses duplicates" and "we can then find the link it refused." A refusal whose lookup failed
+would have printed *"idempotency is NOT provided remotely"*, a claim about Razorpay flatly
+contradicted by the response being reported. Split into B1 (their behaviour, fatal) and B1b
+(our lookup, not fatal — an UNKNOWN receipt is the correct response to an unconfirmable
+outcome). That is the third time on this project that one name covering two properties has
+produced a false statement, after `amountPaise` and `idempotent`. I now treat "can I say this
+in one sentence with an *and* in it" as a design smell.
+
+---
+
+## [Day 3] A 401 that no error message would ever explain
+
+**Symptom:** `npm run live-check` failed instantly on `AUTH`. HTTP 401, authentication failed.
+The `.env` looked completely fine.
+
+**First hypothesis:** Wrong secret, or a key pair from different generations. Both plausible,
+and neither checkable — because every path in this project deliberately refuses to print
+credentials, which is correct and also meant I had no way to look.
+
+**Root cause:** The key ID was 21 characters. Razorpay test key IDs are 23 (`rzp_test_` plus
+14). Two characters had been clipped, almost certainly by a double-click selection in the
+dashboard stopping at a character it treated as a word boundary. The secret was fine.
+
+**Fix:** `npm run doctor` — a local-only, no-network command that reports the *shape* of the
+credentials without ever printing them: prefix, length against the expected length, whitespace,
+quote characters accidentally included, whether the two values were pasted into each other's
+variables. It found it on the first run.
+
+**Lesson:** "Never print secrets" is right, and it removes the ordinary debugging move, so the
+missing tool is one that reports shape rather than content. Length, prefix, and character class
+are enough to find most credential paste errors and reveal nothing useful to an attacker. Worth
+building the moment a project has a secret in it — mine took twenty minutes and turned an
+open-ended 401 into a single line of output. I also miscounted the length in my own test
+fixture while writing this (20 characters while asserting 21), which is a decent argument for
+having the machine count rather than the person.
+
+---
