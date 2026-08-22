@@ -658,3 +658,51 @@ modelled at all. Coverage measures the code you wrote; it is silent about the co
 think to write.
 
 ---
+
+## [Day 3] The diagnostic worked, and the first thing it told me was that I could not count
+
+**Symptom:** The new decline diagnostic ran against the real API and immediately earned its
+keep — `3 confirmed` where the previous run said `2`, because `ATTEMPT_VISIBLE` came back true.
+There had been a real declined payment all along, invisible to every previous run:
+
+```
+ATTEMPT_VISIBLE | held=True
+    failed/BAD_REQUEST_ERROR/international_transaction_not_allowed
+    failed/BAD_REQUEST_ERROR/international_transaction_not_allowed
+```
+
+Then I read it twice. Two entries, byte-identical. Was the customer declined twice, or declined
+once and counted twice? The HTTP log shows a single `GET /payments` and a single link fetch, so
+both readings fit, and my own output could not tell me which.
+
+**Root cause:** `[...onLink, ...matched]` — a concatenation of the link's `payments` array and the
+account's recent payments, with no deduplication. If a failed payment appears in both places, and
+it may well, one attempt is reported as two.
+
+**Fix:** Merge by payment id into a map, and record which source each one came from, so the output
+now reads `seen_in=link+account` and `distinct=1` rather than silently listing the same payment
+twice. Two tests pin both readings: one decline visible in two places counts once, two genuinely
+different declines count twice. The provenance string also settles, by observation, the question I
+explicitly refused to guess at in the previous commit — whether Razorpay puts failures on the link
+entity at all.
+
+**Lesson:** The narrow version is that merging two overlapping sources is a join, and a join
+without a key is a guess. But the reason this one mattered enough to stop and fix is where the
+number was heading. "How many times have we already asked this customer" is a feature of the
+recovery model and a term in the patience penalty. A double-counting attempt counter would not have
+produced an error; it would have produced a slightly pessimistic model that looked entirely
+reasonable, and I would have been tuning coefficients on top of a miscount. Diagnostics feed
+features. A bug in a number is more dangerous than a bug in a code path, because numbers do not
+throw.
+
+**The finding underneath the bug, which is worth more than the fix:** the decline reason is
+`international_transaction_not_allowed`. Razorpay's own vocabulary, observed rather than invented,
+and it is close to a perfect illustration of this project's thesis. Retrying that same card is
+futile — the probability of recovery on retry is approximately zero, because nothing about the card
+or the account will be different next time. Offering a different rail, UPI or netbanking, has a
+high probability of recovering the identical rupee. Same customer, same amount, same moment; two
+actions whose expected values are nowhere near each other. A system that responds to failure with
+"retry, back off, retry" cannot see that difference, and this is the first evidence-backed entry in
+the Day 4 taxonomy rather than one I made up.
+
+---

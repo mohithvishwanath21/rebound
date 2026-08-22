@@ -377,6 +377,47 @@ test('--reconcile still works when the payments list endpoint is unavailable', a
   assert.equal(code, 2, 'a broken diagnostic must not turn into a contradicted belief');
 });
 
+/**
+ * The overlap case, taken from a real run that reported two identical declines when there may
+ * only have been one. If the same payment is visible on the link AND in the account list, it is
+ * one attempt seen twice, not two attempts — and "how many times have we already asked this
+ * customer" is a model feature, so a counter that can double would bias every decision built on
+ * it. The provenance string is asserted because it is what turns this from a guess into an
+ * observation on the next real run.
+ */
+test('one decline visible in two places is counted once, with its sources named', async () => {
+  const fake = createFakeRazorpay();
+  await runCli({ fake });
+  const linkId = [...fake.links.keys()][0];
+  const failed = fake.failAttempt(linkId);
+  // The world in which Razorpay DOES append the failure to the link entity, so both sources
+  // return the very same payment id.
+  fake.links.get(linkId).payments = [
+    { payment_id: failed.id, status: 'failed', method: 'card', amount: failed.amount, error_reason: failed.error_reason },
+  ];
+
+  const { results, output } = await runCli({ fake, argv: ['--reconcile', linkId] });
+  const attempt = byId(results, 'ATTEMPT_VISIBLE');
+
+  assert.match(attempt.detail, /^1 distinct decline\(s\)/, 'one payment, seen twice, is one decline');
+  assert.match(attempt.detail, /link=1 account=1 distinct=1/, 'provenance makes the overlap visible');
+  assert.match(output, /seen_in=link\+account/);
+});
+
+test('two genuinely different declines are counted as two', async () => {
+  const fake = createFakeRazorpay();
+  await runCli({ fake });
+  const linkId = [...fake.links.keys()][0];
+  fake.failAttempt(linkId, { errorReason: 'international_transaction_not_allowed' });
+  fake.failAttempt(linkId, { errorReason: 'payment_failed_due_to_insufficient_funds' });
+
+  const { results } = await runCli({ fake, argv: ['--reconcile', linkId] });
+  const attempt = byId(results, 'ATTEMPT_VISIBLE');
+  assert.match(attempt.detail, /^2 distinct decline\(s\)/);
+  assert.match(attempt.detail, /international_transaction_not_allowed/);
+  assert.match(attempt.detail, /insufficient_funds/);
+});
+
 test('--help prints usage and touches nothing', async () => {
   const fake = createFakeRazorpay();
   const { code, results, output } = await runCli({ fake, argv: ['--help'] });

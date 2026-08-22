@@ -444,13 +444,39 @@ async function explainWhyNothingArrived(ctx, view) {
     say(yellow(`    !! could not list recent payments: ${safe(e.message)}`));
   }
 
-  const failures = [...onLink, ...matched].filter((p) => p?.status === 'failed' || p?.error_code);
+  /**
+   * MERGE BY PAYMENT ID, and remember which source each one came from.
+   *
+   * The first version concatenated the two lists. The first real run then reported two declines
+   * with byte-identical reasons, and I could not tell whether the customer had been declined
+   * twice or once-counted-twice — because the two sources may well overlap and I never checked.
+   *
+   * This is not a reporting nicety. "How many times has this customer already been asked" is a
+   * feature of the recovery model and an input to the patience penalty, so an attempt counter
+   * that can double is a counter that will quietly bias every decision built on top of it.
+   * Better to find that here, in a diagnostic, than in a model coefficient.
+   *
+   * Tracking provenance also answers the open question from the last commit — whether a failed
+   * attempt appears on `link.payments` at all — by observation instead of by assumption.
+   */
+  const byId = new Map();
+  const note = (p, source) => {
+    const id = p?.payment_id ?? p?.id ?? `anon_${byId.size}`;
+    const seen = byId.get(id);
+    if (seen) seen.sources.add(source);
+    else byId.set(id, { payment: p, sources: new Set([source]) });
+  };
+  for (const p of onLink) note(p, 'link');
+  for (const p of matched) note(p, 'account');
+
+  const attempts = [...byId.entries()].map(([id, v]) => ({ id, ...v }));
+  const failures = attempts.filter((a) => a.payment?.status === 'failed' || a.payment?.error_code);
+  const provenance = `link=${onLink.length} account=${matched.length} distinct=${attempts.length}`;
 
   if (failures.length) {
     say(bold('\n  Somebody DID try to pay, and Razorpay declined it:'));
-    for (const f of failures) {
-      const id = f.payment_id ?? f.id ?? '(no id)';
-      say(`    ${id}  method=${f.method ?? '?'}  status=${f.status ?? '?'}`);
+    for (const { id, payment: f, sources } of failures) {
+      say(`    ${id}  method=${f.method ?? '?'}  status=${f.status ?? '?'}  seen_in=${[...sources].join('+')}`);
       say(dim(`      error_code=${f.error_code ?? '-'}  reason=${f.error_reason ?? '-'}`));
       if (f.error_description) say(dim(`      ${safe(f.error_description)}`));
     }
@@ -458,9 +484,11 @@ async function explainWhyNothingArrived(ctx, view) {
       id: 'ATTEMPT_VISIBLE',
       belief: 'a declined attempt on a link is discoverable, with the decline reason attached',
       held: true,
-      detail: failures
-        .map((f) => `${f.status ?? '?'}/${f.error_code ?? '-'}/${f.error_reason ?? '-'}`)
-        .join(' '),
+      detail:
+        `${failures.length} distinct decline(s) [${provenance}] ` +
+        failures
+          .map(({ payment: f, sources }) => `${f.status ?? '?'}/${f.error_code ?? '-'}/${f.error_reason ?? '-'}@${[...sources].join('+')}`)
+          .join(' '),
       fatal: false,
     });
     return;
@@ -474,9 +502,7 @@ async function explainWhyNothingArrived(ctx, view) {
     // contradicted would be the same lie the RECOVERED check used to tell.
     held: null,
     pending: true,
-    detail: `link.payments=${onLink.length} matched_account_payments=${matched.length} list_endpoint=${
-      listWorked ? 'ok' : 'unavailable'
-    } — no attempt found, which is inconclusive`,
+    detail: `${provenance} list_endpoint=${listWorked ? 'ok' : 'unavailable'} — no attempt found, which is inconclusive`,
     fatal: false,
   });
 
