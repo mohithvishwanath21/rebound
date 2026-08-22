@@ -540,3 +540,66 @@ the confirmation had to come from the Windows run — a reminder that "my tests 
 to the platform they passed on.
 
 ---
+
+## [Day 3] My own verification tool told me a lie, in the direction of blaming me
+
+**Symptom:** I created a payment link, did not pay it, and ran the reconciler to see what it
+would say. It said this:
+
+```
+  CONTRADICTED RECOVERED  a paid test-mode link reads back as CAPTURED with the amount that arrived
+               status=created paid=0 of 49900 reference=rbd_SL1_vecheck1_58a43c528f
+
+  Not paid yet.
+
+  2 confirmed, 1 not confirmed
+  1 load-bearing belief(s) contradicted. Fix the code, not the fake.
+```
+
+Read the last two lines together. The tool has correctly observed "not paid yet" and then
+concluded that a belief about Razorpay was false and that I should change my code. Both halves
+of that conclusion are wrong. Nothing about Razorpay was contradicted — nobody had paid the
+link. The correct next step was to open a URL and type a test card number.
+
+**First hypothesis:** A cosmetic problem with the summary line. It is not cosmetic: the run also
+exited non-zero, so if this command were gating a commit, an unpaid link would have blocked the
+commit with a message accusing the integration of being broken.
+
+**Root cause:** `reconcile()` computed one boolean, `view.state === CAPTURED`, and the ledger had
+exactly two rendering states. So the single flag was carrying two completely different facts:
+
+- the link is paid and Razorpay reported it differently than I claimed → **my belief is false**
+- the link is not paid → **nothing has been tested, and nothing has been learned**
+
+Collapsing those into `held: false` was what produced a confident false statement. The
+`!r.held` filter in the summary then swept it up, because `null` is falsy too — so even making
+`held` three-valued would not have fixed the report on its own.
+
+**Fix:** `held` is now genuinely three-valued — `true`, `false`, or `null` for "the precondition
+for learning anything was never met" — with `pending: true` alongside it so the intent is
+explicit rather than inferred from a nullish check. The ledger renders a fourth tag, `PENDING`,
+and the summary partitions into three disjoint buckets instead of filtering on falsiness. There
+is a third exit code too, which matters more than it looks: `0` would let a gate treat "nobody
+paid the link" as a proven recovery, `1` asserts something false about Razorpay, so an
+incomplete run exits `2`. And `RECOVERED` is still fatal the moment money actually arrives — the
+regression test for that exists precisely because making PENDING non-fatal could otherwise have
+quietly made the whole check incapable of failing.
+
+I verified the fix was load-bearing the same way as the duplicate-reference bug: I reverted the
+three-way partition and re-ran. The new test fails, alone, with the old behaviour restored.
+
+**Lesson:** This is the fourth time in three days that one name has been made to carry two
+properties, and I now treat it as the defect class I am most prone to. The previous three were
+`amountPaise` versus `amountCollectedPaise` (requested versus arrived), `idempotent` versus
+`safeToRetry` (a request can be safe to repeat without being deduplicated), and B1 versus B1b
+(Razorpay refused the duplicate, but I could not then find the link). Every single one produced
+a confidently worded false statement rather than a crash, which is why they survived a green
+suite.
+
+The sharper version of the lesson is about verification tools specifically. A checker's entire
+value is that its verdicts can be trusted, so a false negative in a checker is worse than the
+same bug in ordinary code — it spends the operator's attention on a fix that does not exist and
+teaches them to discount the tool. "Not tested yet" and "tested and failed" are different
+states, and any harness that reports on beliefs needs a way to say the first one out loud.
+
+---

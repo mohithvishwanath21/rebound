@@ -89,6 +89,12 @@ test('the whole command runs end to end and exits 0', async () => {
     [],
     'against the fake, every belief should hold — the fake encodes these beliefs by construction'
   );
+  // No check in the default run depends on a human doing anything, so nothing may be PENDING.
+  // If one ever is, the run is claiming less than it looks like it is claiming.
+  assert.deepEqual(
+    results.filter((r) => r.pending).map((r) => r.id),
+    []
+  );
 });
 
 test('every load-bearing belief is actually checked, not just the easy ones', async () => {
@@ -248,15 +254,57 @@ test('--reconcile reports a paid link as recovered, with the amount that actuall
   assert.ok(first.code === 0);
 });
 
-test('--reconcile on an unpaid link says so rather than reporting a recovery', async () => {
+/**
+ * "Not paid yet" and "my belief about Razorpay is false" are different facts, and the first
+ * version of this reported the first as the second — it printed "1 load-bearing belief
+ * contradicted. Fix the code, not the fake." at an operator whose actual next step was to open
+ * a URL and type a card number. That is the worst kind of wrong output: confident, specific,
+ * and pointing away from the fix.
+ *
+ * So this asserts three separate things, because the bug could come back through any of them:
+ * the ledger state is PENDING rather than false, the exit code is neither 0 nor 1, and the
+ * fix-the-code sentence does not appear.
+ */
+test('--reconcile on an unpaid link reports PENDING, not a contradicted belief', async () => {
   const fake = createFakeRazorpay();
   await runCli({ fake });
   const linkId = [...fake.links.keys()][0];
 
   const { code, results, output } = await runCli({ fake, argv: ['--reconcile', linkId] });
-  assert.equal(byId(results, 'RECOVERED').held, false);
-  assert.equal(code, 1, 'an unpaid link is not a recovery and must not exit 0');
+  const recovered = byId(results, 'RECOVERED');
+
+  assert.equal(recovered.pending, true, 'an unpaid link means the check could not run, not that it failed');
+  assert.equal(recovered.held, null, 'held must be null — neither confirmed nor contradicted');
+  assert.equal(code, 2, 'not 0 (nothing was proven) and not 1 (nothing was contradicted)');
   assert.match(output, /Not paid yet/);
+  assert.match(output, /PENDING/, 'the operator-facing tag must be its own state, not CONTRADICTED');
+  assert.ok(
+    !/Fix the code, not the fake/.test(output),
+    'this advice is actively wrong here — the fix is to pay the link'
+  );
+  assert.ok(!/CONTRADICTED/.test(output), 'nothing about Razorpay was contradicted by an unpaid link');
+});
+
+/**
+ * The other half of the same distinction: once money HAS arrived, the check is live again and a
+ * mismatch must be fatal. Without this, making PENDING non-fatal could have quietly made the
+ * whole RECOVERED check unable to fail.
+ */
+test('--reconcile on a link where money arrived but the status disagrees IS contradicted', async () => {
+  const fake = createFakeRazorpay();
+  await runCli({ fake });
+  const linkId = [...fake.links.keys()][0];
+  fake.payLink(linkId);
+  // Money arrived, but Razorpay reports a state my gateway does not map to CAPTURED. This is a
+  // genuine claim about the provider being wrong, and it must still exit 1.
+  fake.links.get(linkId).status = 'partially_paid';
+
+  const { code, results, output } = await runCli({ fake, argv: ['--reconcile', linkId] });
+  const recovered = byId(results, 'RECOVERED');
+  assert.equal(recovered.pending, false, 'money arrived, so the precondition WAS met');
+  assert.equal(recovered.held, false);
+  assert.equal(code, 1, 'a real contradiction must still gate');
+  assert.match(output, /Fix the code, not the fake/);
 });
 
 test('--help prints usage and touches nothing', async () => {

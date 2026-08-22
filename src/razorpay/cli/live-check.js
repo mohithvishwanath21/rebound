@@ -95,9 +95,22 @@ function makeLedger() {
   const results = [];
   return {
     results,
-    record({ id, belief, held, detail, fatal = false }) {
-      results.push({ id, belief, held, detail: detail ?? null, fatal });
-      const tag = held ? green('CONFIRMED   ') : fatal ? red('CONTRADICTED') : yellow('UNVERIFIED  ');
+    /**
+     * `held` is deliberately three-valued: true, false, or null for "the precondition for
+     * learning anything was not met". PENDING is not a soft failure — it carries no
+     * information about Razorpay at all, so it must not be counted alongside beliefs that
+     * were actually tested. See `reconcile()` for the case that forced this.
+     */
+    record({ id, belief, held, detail, fatal = false, pending = false }) {
+      const isPending = pending || held === null;
+      results.push({ id, belief, held: isPending ? null : held, detail: detail ?? null, fatal, pending: isPending });
+      const tag = isPending
+        ? yellow('PENDING     ')
+        : held
+          ? green('CONFIRMED   ')
+          : fatal
+            ? red('CONTRADICTED')
+            : yellow('UNVERIFIED  ');
       say(`  ${tag} ${bold(id)}  ${belief}`);
       if (detail) say(`               ${dim(safe(detail))}`);
     },
@@ -364,29 +377,63 @@ function checkRedactionOnTheRealKey(ctx) {
   });
 }
 
-/** The second half of the end-to-end proof, run after a human pays the link. */
+/**
+ * The second half of the end-to-end proof, run after a human pays the link.
+ *
+ * The distinction this function is careful about, added after it got it wrong once:
+ *
+ *   PENDING      — the link is unpaid. Nothing has been learned. This is not a claim about
+ *                  Razorpay at all; it means a manual step has not happened yet.
+ *   CONTRADICTED — the link IS paid and Razorpay did not report it the way I claimed it would.
+ *                  That is a false belief and the code has to change.
+ *
+ * The first version recorded both as a contradicted load-bearing belief, so an unpaid link
+ * printed "1 load-bearing belief contradicted. Fix the code, not the fake." — advice that is
+ * actively wrong when the real answer is "go pay the link." Same failure as `amountPaise`,
+ * `idempotent` and B1/B1b: one label spanning two states, producing a confident false
+ * statement. A check that cries wolf about my own beliefs is worse than no check, because the
+ * whole value of this command is that its verdicts can be trusted.
+ */
 async function reconcile(ctx, providerRef) {
   const { ledger, gw } = ctx;
   say(bold(`\nReconciling ${providerRef}\n`));
   const view = await gw.fetchStatus({ providerRef });
+
   const captured = view.state === ReceiptState.CAPTURED;
+  const somethingArrived = view.amountPaidPaise > 0;
+  // Razorpay's own vocabulary for "no money has been taken yet".
+  const awaitingPayment = !somethingArrived && ['created', 'issued', 'sent'].includes(String(view.providerStatus));
+  const detail = `status=${view.providerStatus} paid=${view.amountPaidPaise} of ${view.amountPaise} reference=${view.referenceId}`;
+
+  if (awaitingPayment) {
+    ledger.record({
+      id: 'RECOVERED',
+      belief: 'a paid test-mode link reads back as CAPTURED with the amount that arrived',
+      held: null, // neither confirmed nor contradicted — the precondition is unmet
+      pending: true,
+      detail: `${detail} — the link is unpaid, so this proves nothing either way yet`,
+      fatal: false,
+    });
+    say(
+      yellow(
+        `\n  Not paid yet, so there is nothing to reconcile. This is NOT a failed belief —\n` +
+          `  the link simply has not been paid. Open the short_url, pay with test card\n` +
+          `  4111 1111 1111 1111 (any future expiry, any CVV), then run this again.`
+      )
+    );
+    return view;
+  }
 
   ledger.record({
     id: 'RECOVERED',
     belief: 'a paid test-mode link reads back as CAPTURED with the amount that arrived',
-    held: captured && view.amountPaidPaise > 0,
-    detail: `status=${view.providerStatus} paid=${view.amountPaidPaise} of ${view.amountPaise} reference=${view.referenceId}`,
+    held: captured && somethingArrived,
+    detail: captured
+      ? detail
+      : `${detail} — money arrived but the link did not read back as CAPTURED, which contradicts the mapping in liveGateway`,
     fatal: true,
   });
 
-  if (!captured) {
-    say(
-      yellow(
-        `\n  Not paid yet. Open the short_url, pay with test card 4111 1111 1111 1111 ` +
-          `(any future expiry, any CVV), then run this again.`
-      )
-    );
-  }
   return view;
 }
 
@@ -506,13 +553,25 @@ export async function main({ argv = process.argv.slice(2), fetchImpl, sleep, evi
 
   // ------------------------------------------------------------- summary
 
+  /**
+   * A three-way partition, not two.
+   *
+   * `!r.held` used to sweep up the pending case, because `null` is falsy — so an unpaid link
+   * was reported as a contradicted belief about Razorpay. The three buckets are disjoint by
+   * construction here so that cannot happen again by accident.
+   */
   const { results } = ledger;
-  const failed = results.filter((r) => !r.held);
+  const pending = results.filter((r) => r.pending);
+  const confirmed = results.filter((r) => !r.pending && r.held);
+  const failed = results.filter((r) => !r.pending && !r.held);
   const fatal = failed.filter((r) => r.fatal);
 
   say(bold('\nResult'));
   say('------');
-  say(`  ${results.length - failed.length} confirmed, ${failed.length} not confirmed`);
+  say(
+    `  ${confirmed.length} confirmed, ${failed.length} not confirmed` +
+      (pending.length ? `, ${pending.length} pending a manual step` : '')
+  );
 
   if (created?.shortUrl) {
     say('');
@@ -550,6 +609,22 @@ export async function main({ argv = process.argv.slice(2), fetchImpl, sleep, evi
   }
   if (failed.length) {
     say(yellow('  Some non-fatal beliefs were not confirmed — see above and update fakeRazorpay.js.'));
+  }
+  /**
+   * Exit 2, deliberately distinct from both 0 and 1.
+   *
+   * 0 would let a CI gate treat "nobody has paid the link yet" as a proven recovery. 1 would
+   * say a belief about Razorpay was contradicted, which is a claim about Razorpay and is false.
+   * A third code says the only true thing: nothing failed, and something has not happened yet.
+   */
+  if (pending.length) {
+    say(
+      yellow(
+        `  ${pending.length} check(s) are waiting on a manual step. Nothing was contradicted — ` +
+          'there is simply nothing to reconcile until the link is paid.'
+      )
+    );
+    return { code: 2, results };
   }
   return { code: 0, results };
 }
