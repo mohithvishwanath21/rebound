@@ -200,21 +200,21 @@ test('a 500 then a 200 succeeds without surfacing the error', async () => {
 /** The single most important assertion in this file. */
 test('a 500 on a NON-idempotent POST is not retried — one attempt only', async () => {
   const f = scriptedFetch([makeRes(500, ERR('SERVER_ERROR', 'boom'))]);
-  await assert.rejects(client(f).post('/payments/pay_1/capture', { body: {}, idempotent: false }), RazorpayServerError);
+  await assert.rejects(client(f).post('/payments/pay_1/capture', { body: {}, safeToRetry: false }), RazorpayServerError);
   assert.equal(f.calls.length, 1, 'retrying a non-idempotent write risks a double charge');
 });
 
 test('a timeout on a NON-idempotent POST is not retried', async () => {
   const timeout = Object.assign(new Error('aborted'), { name: 'TimeoutError' });
   const f = scriptedFetch([timeout]);
-  await assert.rejects(client(f).post('/x', { body: {}, idempotent: false }), RazorpayUnknownOutcomeError);
+  await assert.rejects(client(f).post('/x', { body: {}, safeToRetry: false }), RazorpayUnknownOutcomeError);
   assert.equal(f.calls.length, 1);
 });
 
 test('a timeout IS retried when the call carries an idempotency guarantee', async () => {
   const timeout = Object.assign(new Error('aborted'), { name: 'TimeoutError' });
   const f = scriptedFetch([timeout, makeRes(200, { id: 'plink_1' })]);
-  const res = await client(f).post('/payment_links', { body: {}, idempotent: true });
+  const res = await client(f).post('/payment_links', { body: {}, safeToRetry: true });
   assert.equal(res.body.id, 'plink_1');
   assert.equal(f.calls.length, 2);
 });
@@ -222,7 +222,7 @@ test('a timeout IS retried when the call carries an idempotency guarantee', asyn
 test('a 429 IS retried even on a non-idempotent write, because nothing was processed', async () => {
   const f = scriptedFetch([makeRes(429, ERR('RATE_LIMIT', 'too many'), { 'Retry-After': '2' }), makeRes(200, { ok: 1 })]);
   const c = client(f);
-  await c.post('/x', { body: {}, idempotent: false });
+  await c.post('/x', { body: {}, safeToRetry: false });
   assert.equal(f.calls.length, 2);
   assert.deepEqual(c.__sleeps, [2000], 'Retry-After must override our own backoff');
 });
@@ -259,17 +259,27 @@ test('backoff grows between attempts and stays under the cap', async () => {
 
 // ---------------------------------------------------------------- redaction
 
+/**
+ * Note on what this test had to be changed to prove. My first version retried once and
+ * then succeeded, and asserted that a redacted key appeared in the logs — it failed,
+ * because on the success path the client logs only status/attempt/ms/requestId and never
+ * echoes a provider description at all. That's the desired behaviour, but it means the
+ * happy path can't demonstrate redaction working. The only line that carries provider
+ * prose is `http_giveup`, which logs the normalised error, so that is the path worth
+ * pinning: exhaust the attempts, then assert the key came through masked.
+ */
 test('logs carry status and timing but never a key', async () => {
   const lines = [];
-  const f = scriptedFetch([makeRes(500, ERR('SERVER_ERROR', `leaked ${KEY_ID}`)), makeRes(200, { ok: 1 })]);
-  await client(f, { onLog: (l) => lines.push(l) }).get('/payment_links');
+  const f = scriptedFetch([makeRes(500, ERR('SERVER_ERROR', `leaked ${KEY_ID}`))]);
+  await assert.rejects(client(f, { onLog: (l) => lines.push(l), maxAttempts: 2 }).get('/payment_links'));
 
   const dump = JSON.stringify(lines);
-  assert.ok(lines.length >= 2, 'expected at least an http line and a retry line');
+  assert.ok(lines.length >= 3, 'expected http, http_retry and http_giveup lines');
   assert.equal(dump.includes(KEY_ID), false, 'the key id must never reach a log line');
   assert.equal(dump.includes(KEY_SECRET), false, 'the key secret must never reach a log line');
   assert.ok(dump.includes('rzp_test_***'), 'a key-shaped string should appear redacted, not removed');
   assert.ok(dump.includes('"status":500'), 'redaction must not cost us the debuggable fields');
+  assert.ok(dump.includes('http_giveup'), 'exhausting attempts must be visible in the log');
 });
 
 test('redact scrubs keys, auth headers and contact details at any depth', () => {
@@ -291,7 +301,7 @@ test('redact scrubs keys, auth headers and contact details at any depth', () => 
 
 test('maskContact keeps enough to debug and not enough to identify', () => {
   assert.equal(maskContact('+919876543210'), '+91***10');
-  assert.equal(maskContact('a@b.com'), 'a@b.com'.startsWith('a@') ? 'a@b.com'.slice(0, 2) + '***@b.com' : '');
+  assert.equal(maskContact('a@b.com'), 'a***@b.com');
   assert.equal(maskContact('123'), '***');
   assert.equal(maskContact(''), '');
 });

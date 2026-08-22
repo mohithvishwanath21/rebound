@@ -146,9 +146,9 @@ export function createRazorpayClient({
    * @param {object} [o]
    * @param {object} [o.body]
    * @param {object} [o.query]
-   * @param {boolean} [o.idempotent] - may this call be retried after an unknown outcome?
+   * @param {boolean} [o.safeToRetry] - may this call be retried after an unknown outcome?
    */
-  async function request(method, path, { body, query, idempotent = method === 'GET' } = {}) {
+  async function request(method, path, { body, query, safeToRetry = method === 'GET' } = {}) {
     const url = new URL(baseUrl + path);
     for (const [k, v] of Object.entries(query ?? {})) {
       if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
@@ -211,7 +211,7 @@ export function createRazorpayClient({
         const err = normaliseThrown(raw);
         lastError = err;
 
-        if (attempt >= cfg.maxAttempts || !isRetryable(err, { idempotent })) {
+        if (attempt >= cfg.maxAttempts || !isRetryable(err, { safeToRetry })) {
           log('http_giveup', {
             method,
             path,

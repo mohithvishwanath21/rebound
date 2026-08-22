@@ -326,6 +326,23 @@ const isMessage = (kind) =>
  *   - probability is monotonically non-increasing in touches already spent
  */
 export function recoveryProbability({ action, latent, event, now, touchesUsed = 0, assumptions }) {
+  // Deliberately NOT `assumptions = materialiseAssumptions()`.
+  //
+  // A default here would be the most expensive convenience in the project. The sensitivity
+  // sweep works by handing each arm a *different* perturbed assumption set; if an arm ever
+  // failed to thread its set through, a silent default would run it against the baseline
+  // instead, every arm would secretly agree, and the sweep would report "the result is
+  // robust to our assumptions" for the single reason that no assumption ever varied. That is
+  // a false claim about the exact thing this simulator exists to be honest about, and it
+  // would be invisible — the numbers would look fine. So a missing set is a crash, and the
+  // one place allowed to choose the default is the caller that constructs the gateway.
+  if (!assumptions?.actionFit) {
+    throw new Error(
+      'recoveryProbability requires a materialised assumption set (see materialiseAssumptions). ' +
+        'It has no default on purpose: silently falling back to baseline assumptions would make ' +
+        'a sensitivity sweep report robustness it never measured.'
+    );
+  }
   const A = assumptions;
   const kind = action.kind;
   const breakdown = {};

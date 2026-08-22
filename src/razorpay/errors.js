@@ -169,18 +169,32 @@ export function isDuplicateReference({ reason, description }) {
 /**
  * The single question the retry loop asks.
  *
- * Non-idempotent calls get one shot, with a single exception: a 429 is refused *before*
- * the request is processed, so no side effect can exist yet and retrying it is safe even
- * for a write. Every other failure mode on a non-idempotent call is left alone.
+ * The flag is called `safeToRetry`, not `idempotent`, and the rename is the result of
+ * getting this wrong once. I had written `idempotent: true` on the order-create call with
+ * the comment "receipt is our unique key, so a replay is safe" — and that is false.
+ * Razorpay does NOT enforce uniqueness on an order's `receipt` field by default, so a
+ * replayed create yields a *second order*. Retrying it is nonetheless perfectly safe, but
+ * for a completely different reason: creating an order moves no money, so a duplicate is a
+ * harmless extra record rather than a second charge.
  *
- * That rule costs us some recoverable rupees on transient 500s, and I'm taking the trade
- * knowingly: a missed retry is a missed rupee, a duplicate charge is a refund, an angry
- * customer and a compliance problem. The costs are not symmetric, so the default should
- * not be either.
+ * Two different properties were hiding under one word. "Idempotent" is a claim about the
+ * provider's behaviour; "safe to retry" is a claim about the consequences. The second is
+ * what the retry loop actually needs, and conflating them is how a caller ends up
+ * asserting a guarantee the provider never made. Naming the flag after the property being
+ * relied upon forces whoever sets it to think about consequences instead of trusting a
+ * remote uniqueness check they haven't verified.
+ *
+ * A 429 is the one exception that applies even without the flag: it is refused *before*
+ * processing, so no side effect can exist yet.
+ *
+ * Everything else on a non-safe call gets one shot. That costs us some recoverable rupees
+ * on transient 500s, and I'm taking the trade knowingly: a missed retry is a missed rupee,
+ * a duplicate charge is a refund, an angry customer and a compliance problem. The costs
+ * are not symmetric, so the default should not be either.
  */
-export function isRetryable(error, { idempotent = false } = {}) {
+export function isRetryable(error, { safeToRetry = false } = {}) {
   if (!(error instanceof RazorpayError)) return false;
-  if (error instanceof RazorpayUnknownOutcomeError) return idempotent;
+  if (error instanceof RazorpayUnknownOutcomeError) return safeToRetry;
   if (!error.retryable) return false;
-  return idempotent || error instanceof RazorpayRateLimitError;
+  return safeToRetry || error instanceof RazorpayRateLimitError;
 }

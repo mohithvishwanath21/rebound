@@ -1,7 +1,10 @@
 import mongoose from 'mongoose';
-import dotenv from 'dotenv';
+import { loadEnv } from '../core/env.js';
 
-dotenv.config();
+// `src/core/env.js` rather than `dotenv`. Same reasoning as the hand-rolled HTTP client:
+// this project needs nine single-line variables, and dropping the dependency means one
+// fewer thing that has to install successfully before anything runs.
+loadEnv();
 
 const DEFAULT_URI = 'mongodb://127.0.0.1:27017/rebound';
 

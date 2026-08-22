@@ -11,15 +11,20 @@
     "seed": "node src/sim/cli/seed.js",
     "describe-sim": "node src/sim/cli/describe.js",
     "verify-sim": "node src/sim/cli/verify.js",
+    "live-check": "node src/razorpay/cli/live-check.js",
     "api": "node src/api/server.js",
     "eval": "node src/eval/cli/run.js",
     "test": "node --test test/*.test.js",
     "check": "npm run test && npm run verify-sim"
   },
+  "comments": {
+    "dependencies": [
+      "Deliberately short. `razorpay` was removed once the client was hand-rolled over fetch (see src/razorpay/httpClient.js for the reasoning), and `dotenv` once src/core/env.js replaced it.",
+      "Everything that produces a number in this project — the seeder, the simulator, the eval, the whole test suite — runs on a clean clone with zero installed packages. The two remaining entries are only needed for the API server and the persisted audit trail."
+    ]
+  },
   "dependencies": {
-    "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "mongoose": "^8.5.0",
-    "razorpay": "^2.9.4"
+    "mongoose": "^8.5.0"
   }
 }
