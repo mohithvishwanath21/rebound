@@ -418,6 +418,34 @@ test('two genuinely different declines are counted as two', async () => {
   assert.match(attempt.detail, /insufficient_funds/);
 });
 
+/**
+ * The tool must not advise repeating a failure it just observed. The unconditional
+ * "pay with test card 4111…" hint printed directly underneath proof that this account had
+ * declined that exact card twice for being international — advice that would have sent the
+ * operator round the same loop a third time.
+ */
+test('after an international decline, the advice stops recommending the card', async () => {
+  const fake = createFakeRazorpay();
+  await runCli({ fake });
+  const linkId = [...fake.links.keys()][0];
+  fake.failAttempt(linkId, { errorReason: 'international_transaction_not_allowed' });
+
+  const { output } = await runCli({ fake, argv: ['--reconcile', linkId] });
+  assert.ok(!/4111 1111 1111 1111/.test(output), 'do not tell the operator to retry a card that cannot work');
+  assert.match(output, /Do NOT retry the card/);
+  assert.match(output, /netbanking|success@razorpay/i, 'the advice must name a route that can actually succeed');
+});
+
+test('with no decline observed, the ordinary card hint is still offered', async () => {
+  const fake = createFakeRazorpay();
+  await runCli({ fake });
+  const linkId = [...fake.links.keys()][0];
+
+  const { output } = await runCli({ fake, argv: ['--reconcile', linkId] });
+  assert.match(output, /4111 1111 1111 1111/, 'nothing was observed to contradict it here');
+  assert.ok(!/Do NOT retry the card/.test(output));
+});
+
 test('--help prints usage and touches nothing', async () => {
   const fake = createFakeRazorpay();
   const { code, results, output } = await runCli({ fake, argv: ['--help'] });

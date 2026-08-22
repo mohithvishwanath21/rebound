@@ -491,7 +491,7 @@ async function explainWhyNothingArrived(ctx, view) {
           .join(' '),
       fatal: false,
     });
-    return;
+    return failures.map((f) => f.payment);
   }
 
   ledger.record({
@@ -514,6 +514,7 @@ async function explainWhyNothingArrived(ctx, view) {
         '    not yet seen a declined attempt on a link, so I cannot say whether one would appear here.'
     )
   );
+  return [];
 }
 
 async function reconcile(ctx, providerRef) {
@@ -537,14 +538,31 @@ async function reconcile(ctx, providerRef) {
       fatal: false,
     });
     // Before telling the operator to go and pay it, find out whether they already tried.
-    await explainWhyNothingArrived(ctx, view);
-    say(
-      yellow(
-        `\n  Not paid yet, so there is nothing to reconcile. This is NOT a failed belief —\n` +
-          `  the link simply has not been paid. Open the short_url, pay with test card\n` +
-          `  4111 1111 1111 1111 (any future expiry, any CVV), then run this again.`
-      )
-    );
+    const declines = await explainWhyNothingArrived(ctx, view);
+    /**
+     * The advice has to depend on what was just observed.
+     *
+     * The first version printed "pay with test card 4111 1111 1111 1111" unconditionally —
+     * including immediately after printing proof that this account had declined that exact card
+     * twice for being international. A static hint next to a live observation that contradicts it
+     * is not a small cosmetic issue: it is the tool telling the operator to repeat a known
+     * failure, which is the same category of wrong as the CONTRADICTED bug.
+     */
+    const cardWasRefused = declines.some((d) => /international|domestic/i.test(d.error_reason ?? d.error_description ?? ''));
+    say(yellow(`\n  Not paid yet, so there is nothing to reconcile. This is NOT a failed belief —`));
+    say(yellow(`  the link simply has not been paid. Open the short_url and pay it, then re-run.`));
+    if (cardWasRefused) {
+      say(
+        red(
+          `\n  Do NOT retry the card. This account accepts domestic Indian cards only, and the\n` +
+            `  attempt above was refused for exactly that reason — a retry will fail identically.\n` +
+            `  Use netbanking (any bank, then the simulated 'Success' button) or UPI success@razorpay.`
+        )
+      );
+    } else {
+      say(dim(`    test card 4111 1111 1111 1111, any future expiry, any CVV`));
+      say(dim(`    or netbanking: any bank, then the simulated 'Success' button`));
+    }
     return view;
   }
 
