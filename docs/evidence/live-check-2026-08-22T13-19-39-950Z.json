@@ -1,0 +1,221 @@
+{
+  "runId": "live_mt4eni20_3360",
+  "at": "2026-08-22T13:19:39.949Z",
+  "keyIdPrefix": "rzp_test_***",
+  "mode": "LIVE_TEST",
+  "results": [
+    {
+      "id": "REDACT",
+      "belief": "redact() removes the REAL key and secret, not just test-shaped fixtures",
+      "held": true,
+      "detail": "{\"authorization\":\"***\",\"note\":\"a log line that accidentally interpolated rzp_test_***\",\"key_secret\":\"***\"}",
+      "fatal": true
+    },
+    {
+      "id": "AUTH",
+      "belief": "the key pair authenticates against api.razorpay.com",
+      "held": true,
+      "detail": "HTTP 200, key rzp_test_***...",
+      "fatal": true
+    },
+    {
+      "id": "CREATE",
+      "belief": "a payment link can be created and comes back with a payable short_url",
+      "held": true,
+      "detail": "plink_TSpUdX79ucaa45 state=SENT notified=false",
+      "fatal": true
+    },
+    {
+      "id": "B1",
+      "belief": "Razorpay REJECTS a duplicate reference_id on payment links",
+      "held": true,
+      "detail": "the duplicate was refused (receipt state=SENT)",
+      "fatal": true
+    },
+    {
+      "id": "B1b",
+      "belief": "after a refusal we can locate the existing link by reference_id",
+      "held": true,
+      "detail": "replay resolved to the same link plink_TSpUdX79ucaa45",
+      "fatal": false
+    },
+    {
+      "id": "JOIN",
+      "belief": "our reference_id comes back on a fetch, so a webhook can find the case",
+      "held": true,
+      "detail": "fetched referenceId=rbd_SL1_vecheck1_58a43c528f status=created",
+      "fatal": true
+    },
+    {
+      "id": "B2",
+      "belief": "Razorpay does NOT dedupe orders on `receipt` — two creates give two orders",
+      "held": true,
+      "detail": "two orders (order_TSpUgv8BZClFu3, order_TSpUh1tZT3VoU2) share receipt rbd_RN1_vecheck2_06ad054471 — so retry safety rests on \"an order moves no money\", not on remote uniqueness",
+      "fatal": false
+    },
+    {
+      "id": "RETRY_HONEST",
+      "belief": "creating an order does not by itself capture anything",
+      "held": true,
+      "detail": "state=ATTEMPTED collected=0",
+      "fatal": false
+    },
+    {
+      "id": "B3a",
+      "belief": "reference_id longer than 40 chars is rejected",
+      "held": true,
+      "detail": "BAD_REQUEST_ERROR: reference_id: the length must be no more than 40.",
+      "fatal": false
+    },
+    {
+      "id": "B3b",
+      "belief": "expire_by less than 15 minutes away is rejected",
+      "held": true,
+      "detail": "BAD_REQUEST_ERROR: expire_by: timestamp must be atleast 15 minutes in future.",
+      "fatal": false
+    }
+  ],
+  "httpCalls": [
+    {
+      "event": "http",
+      "method": "GET",
+      "path": "/payment_links",
+      "status": 200,
+      "attempt": 1,
+      "ms": 1071,
+      "requestId": null
+    },
+    {
+      "event": "http",
+      "method": "POST",
+      "path": "/payment_links",
+      "status": 200,
+      "attempt": 1,
+      "ms": 1326,
+      "requestId": null
+    },
+    {
+      "event": "channel_not_dispatched",
+      "channel": "WHATSAPP",
+      "reference": "rbd_SL1_vecheck1_58a43c528f",
+      "note": "link created and payable, notification not sent by Razorpay"
+    },
+    {
+      "event": "http",
+      "method": "POST",
+      "path": "/payment_links",
+      "status": 400,
+      "attempt": 1,
+      "ms": 610,
+      "requestId": null
+    },
+    {
+      "event": "http_giveup",
+      "method": "POST",
+      "path": "/payment_links",
+      "attempt": 1,
+      "error": {
+        "type": "RazorpayDuplicateError",
+        "code": "BAD_REQUEST_ERROR",
+        "description": "payment link with given reference_id: rbd_SL1_vecheck1_58a43c528f already exists. Please create a payment link with a different reference_id",
+        "status": 400,
+        "requestId": null,
+        "reason": null,
+        "field": null,
+        "retryable": false
+      }
+    },
+    {
+      "event": "http",
+      "method": "GET",
+      "path": "/payment_links",
+      "status": 200,
+      "attempt": 1,
+      "ms": 1433,
+      "requestId": null
+    },
+    {
+      "event": "channel_not_dispatched",
+      "channel": "WHATSAPP",
+      "reference": "rbd_SL1_vecheck1_58a43c528f",
+      "note": "link created and payable, notification not sent by Razorpay"
+    },
+    {
+      "event": "http",
+      "method": "GET",
+      "path": "/payment_links/plink_TSpUdX79ucaa45",
+      "status": 200,
+      "attempt": 1,
+      "ms": 97,
+      "requestId": null
+    },
+    {
+      "event": "http",
+      "method": "POST",
+      "path": "/orders",
+      "status": 200,
+      "attempt": 1,
+      "ms": 140,
+      "requestId": null
+    },
+    {
+      "event": "http",
+      "method": "POST",
+      "path": "/orders",
+      "status": 200,
+      "attempt": 1,
+      "ms": 97,
+      "requestId": null
+    },
+    {
+      "event": "http",
+      "method": "POST",
+      "path": "/payment_links",
+      "status": 400,
+      "attempt": 1,
+      "ms": 678,
+      "requestId": null
+    },
+    {
+      "event": "http_giveup",
+      "method": "POST",
+      "path": "/payment_links",
+      "attempt": 1,
+      "error": {
+        "type": "RazorpayValidationError",
+        "code": "BAD_REQUEST_ERROR",
+        "description": "reference_id: the length must be no more than 40.",
+        "status": 400,
+        "requestId": null,
+        "reason": null,
+        "field": null,
+        "retryable": false
+      }
+    },
+    {
+      "event": "http",
+      "method": "POST",
+      "path": "/payment_links",
+      "status": 400,
+      "attempt": 1,
+      "ms": 805,
+      "requestId": null
+    },
+    {
+      "event": "http_giveup",
+      "method": "POST",
+      "path": "/payment_links",
+      "attempt": 1,
+      "error": {
+        "type": "RazorpayValidationError",
+        "code": "BAD_REQUEST_ERROR",
+        "description": "expire_by: timestamp must be atleast 15 minutes in future.",
+        "status": 400,
+        "requestId": null,
+        "reason": null,
+        "field": null,
+        "retryable": false
+      }
+    }
+  ]
+}

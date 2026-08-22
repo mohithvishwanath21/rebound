@@ -533,8 +533,10 @@ export async function main({ argv = process.argv.slice(2), fetchImpl, sleep, evi
     },
     { dir: evidenceDir }
   );
-  // Both separators, because this same line printed an absolute Windows path before.
-  say(dim(`\n  evidence written to ${evidence.replace(/^.*[/\\]docs[/\\]/, 'docs/')}`));
+  // Trim to a repo-relative path AND normalise separators, so a Windows run doesn't print
+  // 'docs/evidence\live-check-….json'. Display only — the file itself is written with join().
+  const shown = evidence.replace(/^.*[/\\]docs[/\\]/, 'docs/').replace(/\\/g, '/');
+  say(dim(`\n  evidence written to ${shown}`));
 
   // The claim boundary, restated every run so it cannot drift from what the code did.
   say(dim('\n  What this proves: the integration works against the real API — auth, creation,'));
