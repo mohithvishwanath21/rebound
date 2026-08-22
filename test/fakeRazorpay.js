@@ -45,6 +45,11 @@ export function createFakeRazorpay({ now = () => new Date() } = {}) {
   const json = (status, body) => ({
     ok: status >= 200 && status < 300,
     status,
+    // NOTE, and this fake is currently KINDER THAN REALITY here: every live run on 2026-08-22
+    // came back with `requestId: null` on every call, so the real API does not send
+    // `x-razorpay-request-id` on the endpoints this project uses (or sends it under another
+    // name — the artifacts cannot distinguish those). Our capture in httpClient.js is correct;
+    // there is simply nothing to capture. Nothing may depend on a request id being present.
     headers: {
       get: (k) => (k.toLowerCase() === 'x-razorpay-request-id' ? `req_TEST${counter}` : null),
       forEach: (fn) => fn(`req_TEST${counter}`, 'x-razorpay-request-id'),
@@ -146,11 +151,14 @@ export function createFakeRazorpay({ now = () => new Date() } = {}) {
     link.amount_paid = paid;
     link.status = paid >= link.amount ? 'paid' : 'partially_paid';
     link.updated_at = unix();
-    // A SUCCESSFUL payment is appended to the link entity. This is the documented behaviour and
-    // the deliberate asymmetry with `failAttempt`, which appends nothing — an asymmetry confirmed
-    // from the failure side on 2026-08-22 (`link=0 account=2`) but still only *believed* from the
-    // success side. If a real run reports `seen_in=account` for a capture, this fixture is wrong
-    // and the log gets an entry rather than the fixture getting quietly relaxed.
+    // A SUCCESSFUL payment is appended to the link entity. This is now CONFIRMED from both sides
+    // against the real API on 2026-08-22, which is worth stating precisely because the two halves
+    // were established by two different runs:
+    //
+    //   - failures do NOT appear here      (observed `link=0 account=2`, run 14:19)
+    //   - successes DO appear here         (observed `method=netbanking seen_in=link`, run 14:35)
+    //
+    // So the asymmetry this fixture encodes is no longer a belief. Keep it asymmetric.
     link.payments = [
       ...(Array.isArray(link.payments) ? link.payments : []),
       {
