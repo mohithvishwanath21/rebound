@@ -41,6 +41,24 @@ const FORBIDDEN_TOKENS = [
   'fundsAvailableFrom',
   'maxWillingToPayPaise',
   'trueDowntimeWindow',
+  // Added on Day 4, after finding it by accident rather than by reasoning.
+  //
+  // `buildFailurePayload()` in the generator attaches `_generatedVague: true` to exactly those
+  // failures whose error text was deliberately chosen to be unmatchable. The comment beside it
+  // said "stripped before the agent sees it." Nothing stripped it. No test enforced it. And it
+  // was not on this list, because when this list was written the field did not exist.
+  //
+  // Reading it would let the agent know in advance which cases are hard — it could abstain on
+  // precisely those and post a diagnosis accuracy no real integration could reproduce. It is
+  // the answer key for the only metric Day 4 produces.
+  //
+  // Worth being honest about what this addition does and does not fix: a denylist can only
+  // ever catch names somebody thought of. That is why `src/agent/observe.js` projects events
+  // through an ALLOWLIST at runtime, so the next field nobody thought of is invisible by
+  // default. This entry stops the intent at build time; the allowlist stops the data. Two
+  // mechanisms that fail differently, on purpose.
+  '_generatedVague',
+  'trueCause',
 ];
 
 function walk(dir) {

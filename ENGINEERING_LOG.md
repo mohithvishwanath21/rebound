@@ -755,3 +755,163 @@ creation, remote idempotency, the reference join, redaction, a declined attempt 
 recovery policy is any good. That number comes from simulation, and it is next.
 
 ---
+
+## [Day 4] The rule table classified 100% of failures and had never once said "I don't know"
+
+**Symptom:** The diagnosis layer's first scored run reported 89.0% accuracy and an abstention rate of
+exactly 0.0%. The generator deliberately gives about 12% of failures an error message chosen to be
+unmatchable, so 0.0% was arithmetically impossible unless something was matching them anyway.
+
+**First hypothesis:** The vague-message rate wasn't firing — a seeding bug in the generator, or the
+vague branch never being taken.
+
+**Root cause:** `payment_failed` was in DO_NOT_HONOUR's `reason` list. Razorpay sends
+`error_reason: payment_failed` in two completely different situations: when the issuer declined for a
+specific stated reason, and when there is no information available at all. One string, two meanings.
+Matching it meant every uninformative failure was confidently labelled "the bank declined this," and
+because the rule table returns on first match, the tier-2 classifier and the UNKNOWN fallback were
+unreachable dead code. Both had been written, neither had ever run.
+
+**Fix:** Removed `payment_failed` from the reason list. Abstention went from 0.0% to 6.8% and
+accuracy went *up* to 91.3%, because the cases it had been guessing on were cases it was getting
+wrong. `test/diagnose.test.js` now asserts a `payment_failed` payload abstains.
+
+**Lesson:** A table that never abstains looks exactly like a table that is always right, and both
+produce a single confident label per input. The distinguishing measurement is not accuracy — it is
+the abstention rate, checked against how many cases you *know* are unanswerable. This is the sixth
+time this project has been bitten by one name covering two properties, and the first time the name
+belonged to somebody else's API.
+
+---
+
+## [Day 4] A compliance rule read 28 dead cards as suspected fraud
+
+**Symptom:** The largest single confusion in the first scored run was 28 of 600 events where the true
+cause was EXPIRED_INSTRUMENT and the diagnosis was RISK_BLOCKED.
+
+**First hypothesis:** Overlapping error text between two genuinely similar failure classes, needing a
+narrower rule for the expiry case.
+
+**Root cause:** RISK_BLOCKED carried the text pattern `'blocked by'`, which matches the entirely
+ordinary sentence "The card is blocked by the issuing bank." RISK_BLOCKED is `humanOnly: true`, so
+each of those 28 cards was frozen and queued for a human to review as a suspected fraud case. A
+customer whose card had simply expired would have been treated as a risk subject, and the operator
+queue would fill with 28 non-incidents per batch.
+
+**Fix:** Narrowed the pattern set to `['risk', 'fraud', 'security check', 'flagged for review']` —
+phrases that only appear when a risk system is actually the thing talking.
+
+**Lesson:** RISK_BLOCKED sits near the top of the table on purpose, because a risk hold must never be
+overridden by a cheaper explanation below it. But ordering by compliance also *amplifies* compliance
+false positives: the earlier a rule sits, the more traffic it sees, so a rule placed at the top must
+be the narrowest rule in the table rather than the broadest. Getting the ordering right and the
+patterns wrong is worse than getting neither right, because the mistakes are now systematic.
+
+---
+
+## [Day 4] A field commented "stripped before the agent sees it" was not stripped by anything
+
+**Symptom:** Found by reading, not by a failing test. `buildFailurePayload()` attaches
+`_generatedVague: true` to exactly those failures whose error text was deliberately made unmatchable,
+with a comment saying it is removed before the agent sees it.
+
+**First hypothesis:** None. The comment was simply false.
+
+**Root cause:** Nothing removed it. No test enforced it. It was not in `test/boundary.test.js`'s
+denylist either — because when that list was written, the field did not exist yet. This is the answer
+key for the only metric Day 4 produces: an agent that reads it knows in advance which cases are hard,
+can abstain on precisely those, and posts a diagnosis accuracy that no real integration could ever
+reproduce. Nothing had read it yet, so nothing was wrong with the numbers. It was live ammunition
+sitting in the observable payload waiting for someone to reach for it.
+
+**Fix:** Two mechanisms, chosen because they fail differently. `src/agent/observe.js` now projects
+every event through an explicit ALLOWLIST, so anything not named is dropped at runtime — including
+fields nobody has invented yet. And `_generatedVague` was added to the boundary denylist, which fails
+the build if agent code so much as mentions it.
+
+**Lesson:** A denylist can only catch names somebody thought of, which makes it a poor default for a
+boundary that has to hold against future edits. The allowlist stops the data; the denylist stops the
+*intent*. Neither subsumes the other, and the general form is that a comment asserting an invariant
+is a to-do item, not an invariant. Every "X is stripped/validated/checked elsewhere" comment in a
+codebase is worth grepping for the code that does it.
+
+---
+
+## [Day 4] The webhook normaliser dropped the three fields its only consumer needed most
+
+**Symptom:** Noticed while wiring diagnosis to the two paths a failure can arrive by.
+`normaliseWebhook()` returned `errorCode` and `errorDescription` and nothing else about the error.
+
+**First hypothesis:** An oversight in a rarely-touched file.
+
+**Root cause:** The normaliser was written on Day 3, before anything consumed it, so "the error
+fields" meant whatever looked like an error field at the time. The rule table matches most
+specifically on `error_reason`, then on `error_source` plus `error_step` — precisely the three being
+discarded. The consequence is the quiet kind: a failure arriving by webhook could only ever reach the
+free-text tier, the tier a payments company can invalidate by rewording a sentence, while the
+identical failure arriving through a polled API read classified at the top tier. No exception, no
+warning, no reason to suspect it. Just systematically worse diagnoses on one of two code paths, and
+the text tier turns out to be the worst tier there is (see below).
+
+**Fix:** `normaliseWebhook` now returns `errorReason`, `errorSource`, `errorStep` and `method`.
+`test/diagnose.test.js` asserts the *agreement property* rather than the field list — the same
+failure delivered by webhook and by polling must produce the same root cause at the same match tier.
+That test would have caught this; a shape assertion on the return value would not have.
+
+**Lesson:** Writing a producer before its consumer exists means guessing at the contract, and the
+guess fails silently because both sides are individually plausible. Where two code paths are supposed
+to be equivalent, the test worth writing asserts they *agree*, not that each one matches a snapshot I
+wrote by hand.
+
+---
+
+## [Day 4] Measured: the free-text tier is 0% accurate, on both splits
+
+Not a bug — a result, and the one Day 4 exists to have produced.
+
+`diagnose()` deliberately emits no confidence number. A confidence of 0.93 claims that in roughly 93
+of 100 similar cases the answer is right, and nothing here had measured that; inventing it would mean
+the expected-value engine multiplies real money by a number I made up, indistinguishable from a
+measured probability in every log line. So the engine emits `matchTier` instead — an observable fact
+about *how* the match was made — and `src/eval/diagnosisAccuracy.js` measures the hit rate per tier.
+
+The first run of that measurement:
+
+| tier | TRAIN n | TRAIN acc | TEST n | TEST acc |
+|---|---|---|---|---|
+| REASON | 432 | 100.0% | 378 | 100.0% |
+| STATE | 4 | 100.0% | 5 | 100.0% |
+| SOURCE_STEP | 8 | 100.0% | 7 | 100.0% |
+| FLAG | 8 | 100.0% | 10 | 100.0% |
+| DEFAULT | 106 | 94.3% | 131 | 93.9% |
+| **TEXT** | **5** | **0.0%** | **13** | **0.0%** |
+| NONE (abstained) | 37 | — | 56 | — |
+
+Two things fall out of this. The precedence order I wrote from reasoning — enum beats state beats
+text — is exactly the order the measurement produces, which is the cheapest possible validation of a
+design decision. And the text tier is not merely weaker than matching an enum. It is wrong every
+single time, 18 for 18 across both splits.
+
+That is structural rather than unlucky. Text matching only ever runs on payloads whose reason enum
+already failed to match, and that is precisely the population where the sentence is uninformative
+too. Checked in isolation the text patterns classify correctly — feed one the string it looks for and
+it returns the right cause. They are not wrong in principle; they are wrong on the only population
+where they actually fire. Those two facts look contradictory in a summary and are both true.
+
+I did not delete the rules, because that 0% is measured against error text I wrote myself and real
+providers may phrase things more usefully. Instead a TEXT-tier match now sets
+`requiresApprovalForMoneyMovement`, the same flag an LLM-tier guess gets: a belief this weak does not
+get to charge a customer on its own authority. Day 6's guardrail engine reads that flag.
+
+**Where Day 4 ends.** TRAIN 92.0% accuracy, 6.2% abstention, 10 unsafe-retry beliefs (1.7%) worth
+₹11,983 of ₹64,45,145 at risk. Held-out TEST 87.2%, 9.3% abstention, 20 unsafe (3.3%) of ₹73,03,807 —
+a 4.8-point generalisation gap that is published rather than tuned away. `missedHumanOnly` is 6 on
+TRAIN and `falseHumanOnly` is 0, which is the safe direction to be wrong in but not a free lunch: the
+6 are unflagged invoice disputes, and there is currently no observable signal that distinguishes them
+from ordinary forgetfulness. Naming that is more useful than a metric that hides it.
+
+The residual unsafe-retry risk now lives almost entirely in one place: UNKNOWN itself carries
+`retryCanSucceed: true`, so every abstention permits one cautious attempt. Whether that is the right
+default is a policy question, not a diagnosis question, and Day 6 owns it.
+
+---

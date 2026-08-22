@@ -130,6 +130,68 @@ export const ROOT_CAUSES = {
       'recovery is collecting a new instrument.',
   },
 
+  /**
+   * THE ONLY CLASS IN THIS FILE THAT WAS FOUND RATHER THAN IMAGINED.
+   *
+   * Every other entry was written on Day 1 from prior knowledge of the API. This one exists
+   * because on 2026-08-22 the very first real payment this project ever attempted was
+   * declined, twice, with `error_reason: international_transaction_not_allowed` and the
+   * description "Your payment could not be completed as this business accepts domestic
+   * (Indian) card payments only."
+   *
+   * Nothing in the twelve classes I invented covered it. Traced through the rule table, that
+   * payload fell through every single rule and landed on UNKNOWN — which permits one cautious
+   * retry. So the system's considered response to a decline that can NEVER succeed on that
+   * rail was to try it again.
+   *
+   * It is not RISK_BLOCKED: nothing was judged risky, and routing it to a human wastes an
+   * operator on a case with a trivial automated fix. It is not DO_NOT_HONOUR: the issuer never
+   * got a say. It is not EXPIRED_INSTRUMENT: the card is perfectly alive and works elsewhere.
+   * The refusal comes from the MERCHANT's own acceptance configuration.
+   *
+   * Which makes it the cleanest illustration of this project's entire thesis. Retrying the
+   * same card is worth approximately zero. Sending the same customer to a different rail
+   * recovered the identical ₹499 on the first attempt. Same person, same amount, same minute,
+   * two actions whose expected values are nowhere near each other — and a retry loop cannot
+   * express the difference between them.
+   */
+  INSTRUMENT_NOT_ACCEPTED: {
+    id: 'INSTRUMENT_NOT_ACCEPTED',
+    label: 'Instrument or rail not accepted by this merchant',
+    // Our configuration refused it. Blaming the customer for this would be both wrong and,
+    // in a message, insulting: their card is fine.
+    fault: Fault.MERCHANT,
+    // Zero on the same rail, for the same reason as a dead card but with none of the same
+    // remedies. Acceptance rules do not change while a customer waits.
+    retryCanSucceed: false,
+    timingSensitive: false,
+    prefersSalaryWindow: false,
+    automationAllowed: true,
+    // Appropriate, but the wording must offer an alternative rather than report a failure.
+    messagingAppropriate: true,
+    railSwitchHelps: true,
+
+    /**
+     * A NEW FLAG, BECAUSE `needsNewInstrument` WAS COVERING TWO DIFFERENT REMEDIES.
+     *
+     * EXPIRED_INSTRUMENT needs the customer to go and find a different card — a real
+     * friction step with a real drop-off rate. This class needs them to press a different
+     * button on a page they are already looking at, using money they already have.
+     *
+     * Both would have read `needsNewInstrument: true`, and the policy would have costed them
+     * identically. They are not remotely the same intervention. Sixth time in this codebase
+     * that one name has quietly covered two properties, so it gets its own name.
+     */
+    railSwitchIsPrimary: true,
+    needsNewInstrument: false,
+
+    explanation:
+      'This merchant account does not accept the instrument the customer used — a foreign ' +
+      'card on a domestic-only account, an unsupported network, a currency mismatch. The ' +
+      'customer is willing and their card works fine elsewhere. Retrying the same rail is ' +
+      'exactly zero. Offering a different rail is usually an immediate recovery.',
+  },
+
   MANDATE_REVOKED: {
     id: 'MANDATE_REVOKED',
     label: 'Mandate revoked or paused',
@@ -292,10 +354,34 @@ export function getRootCause(id) {
 export const RULE_TABLE = [
   // --- Compliance-critical: must match before anything more general ---
   { cause: 'RISK_BLOCKED', reason: ['risk_threshold_breached', 'payment_risk_check_failed', 'suspected_fraud'] },
-  { cause: 'RISK_BLOCKED', textAny: ['risk', 'fraud', 'blocked by', 'security check'] },
+  // `blocked by` used to be in this list, and it cost 28 misclassifications out of 600 on the
+  // first batch this table was ever measured against. It was meant to catch "blocked by our
+  // risk rules"; it also catches "The card is blocked by the issuing bank", which is an
+  // EXPIRED_INSTRUMENT. Because compliance rules deliberately sit first, a loose pattern here
+  // outranks the correct class everywhere — the ordering that protects compliance also
+  // amplifies compliance false positives, so patterns at the top of this table must be the
+  // narrowest in it, not the broadest.
+  //
+  // The cost was not just accuracy. Those 28 dead cards were routed to a human queue as
+  // suspected fraud, which both wastes the operator and hides the one remedy that works:
+  // asking for a new card.
+  { cause: 'RISK_BLOCKED', textAny: ['risk', 'fraud', 'security check', 'flagged for review'] },
 
   { cause: 'MANDATE_REVOKED', reason: ['mandate_revoked', 'mandate_cancelled', 'mandate_paused', 'subscription_mandate_not_active'] },
   { cause: 'MANDATE_REVOKED', textAny: ['mandate', 'e-mandate', 'emandate', 'autopay revoked', 'standing instruction'] },
+
+  // --- Merchant acceptance. Above EXPIRED_INSTRUMENT on purpose: that rule's text patterns
+  //     include 'card not supported', which is an acceptance problem misread as a dead card. ---
+  //
+  // `confirmed` marks a pattern verified against the real API rather than written from memory.
+  // Only one string here has earned it, and the rest are deliberately not invented: guessing a
+  // pile of plausible sibling enums is exactly the mistake this file warns about at the top.
+  { cause: 'INSTRUMENT_NOT_ACCEPTED', reason: ['international_transaction_not_allowed'], confirmed: '2026-08-22' },
+  // Both substrings below are lifted from the confirmed description, not imagined.
+  { cause: 'INSTRUMENT_NOT_ACCEPTED', textAny: ['accepts domestic', 'domestic (indian) card'], confirmed: '2026-08-22' },
+  // UNCONFIRMED. Plausible siblings of the confirmed case, kept narrow and flagged so nobody
+  // later mistakes them for evidence. If a live run ever matches one of these, move it up.
+  { cause: 'INSTRUMENT_NOT_ACCEPTED', textAny: ['card network not supported', 'currency not supported', 'international cards are not'] },
 
   // --- Unambiguous technical classes ---
   { cause: 'EXPIRED_INSTRUMENT', reason: ['card_expired', 'invalid_card', 'card_blocked', 'card_disabled', 'invalid_card_number'] },
@@ -317,7 +403,21 @@ export const RULE_TABLE = [
 
   // --- Deliberately last: the catch-all bank decline. Anything that reaches
   //     here is genuinely ambiguous, and is treated as such by the policy. ---
-  { cause: 'DO_NOT_HONOUR', reason: ['payment_failed', 'do_not_honour', 'transaction_not_permitted', 'declined_by_bank'] },
+  //
+  // `payment_failed` USED TO BE IN THIS LIST AND THAT WAS THE WORST BUG IN THE TABLE.
+  //
+  // It is Razorpay's generic catch-all — the reason you get when there is no reason. Listing
+  // it here meant every genuinely uninformative failure matched at REASON tier, the most
+  // confident tier there is, and came back as "the bank declined, retry a bounded number of
+  // times." Measured consequence on a 600-event batch: abstention was 0.0%, despite 12% of
+  // those failures being generated specifically to be unidentifiable. The tier-2 and UNKNOWN
+  // paths were unreachable dead code and I had no idea, because a table that never abstains
+  // looks exactly like a table that is always right.
+  //
+  // One name covering two properties again: `payment_failed` means both "the issuer declined,
+  // specifically" and "we have no information." Only the second is true often enough to
+  // matter, so it now matches nothing and those cases abstain, which is the honest answer.
+  { cause: 'DO_NOT_HONOUR', reason: ['do_not_honour', 'transaction_not_permitted', 'declined_by_bank'] },
   { cause: 'DO_NOT_HONOUR', textAny: ['do not honour', 'do not honor', 'declined', 'refused by bank'] },
 ];
 

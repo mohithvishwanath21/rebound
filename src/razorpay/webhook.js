@@ -185,7 +185,30 @@ export function normaliseWebhook(envelope) {
     amountPaise: link?.amount ?? payment?.amount ?? order?.amount ?? null,
     amountPaidPaise: link?.amount_paid ?? (payment?.status === 'captured' ? payment.amount : null),
     status: link?.status ?? payment?.status ?? order?.status ?? null,
+
+    /**
+     * THE DIAGNOSTIC FIELDS. THREE OF THESE FOUR WERE MISSING UNTIL DAY 4.
+     *
+     * This normaliser used to return `errorCode` and `errorDescription` only. It was written
+     * before anything consumed it, so "the error fields" meant whatever looked like an error
+     * field at the time.
+     *
+     * Then the rule table got its first consumer, and the rule table matches most specifically
+     * on `error_reason`, then on `error_source` + `error_step`. Those were exactly the three
+     * being dropped. A diagnosis running off a webhook could only ever reach the free-text
+     * tier — the tier that a payments company can invalidate by rewording a sentence — while
+     * the identical failure arriving through a polled API read would classify at the top tier.
+     *
+     * The failure mode is the quiet kind: no exception, no warning, just systematically worse
+     * diagnoses on one code path than the other, and no reason to suspect it.
+     *
+     * `error_reason` is confirmed present on real payment entities — the 2026-08-22 live run
+     * read `international_transaction_not_allowed` off a genuine decline.
+     */
     errorCode: payment?.error_code ?? null,
+    errorReason: payment?.error_reason ?? null,
+    errorSource: payment?.error_source ?? null,
+    errorStep: payment?.error_step ?? null,
     errorDescription: payment?.error_description ?? null,
     method: payment?.method ?? null,
   };
