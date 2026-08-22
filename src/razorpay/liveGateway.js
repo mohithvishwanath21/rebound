@@ -366,6 +366,18 @@ export function createLiveGateway({
           amountPaise: body.amount ?? null,
           amountPaidPaise: body.amount_paid ?? 0,
           referenceId: body.reference_id ?? null,
+          /**
+           * Razorpay puts an attempt history on the link as `payments`, which is `null` rather
+           * than `[]` when there are none. Normalised to an array so callers can iterate
+           * without a nullish dance.
+           *
+           * Explicitly NOT claimed: that a *failed* attempt shows up here. I have not observed
+           * one, and the docs describe this as the payments made against the link, which may
+           * well mean successful ones only. Anything that needs to distinguish "nobody opened
+           * the page" from "somebody tried and was declined" must treat an empty array as
+           * inconclusive rather than as proof of the former.
+           */
+          attempts: Array.isArray(body.payments) ? body.payments : [],
           raw: body,
         };
       }

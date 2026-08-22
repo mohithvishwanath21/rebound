@@ -149,6 +149,47 @@ export function createFakeRazorpay({ now = () => new Date() } = {}) {
     return { link, payment };
   }
 
+  /**
+   * Simulate a human opening the link and being DECLINED.
+   *
+   * The state that matters most for a recovery product and is easiest to leave untested: the
+   * link stays `created` with `amount_paid: 0`, exactly as if nobody had ever visited, while a
+   * failed payment exists on the account carrying the reason.
+   *
+   * Two modelling choices here are beliefs, not knowledge, and are flagged as such:
+   *
+   *   1. A failed attempt is NOT appended to the link's own `payments` array. That is my reading
+   *      of the docs and it is why `explainWhyNothingArrived` also queries the account.
+   *   2. `error_code` / `error_reason` / `error_description` are the field names, and the
+   *      reason vocabulary below is copied from Razorpay's published decline reasons.
+   *
+   * If the real API disagrees, the honest outcome is a log entry, not a quietly adjusted fake.
+   */
+  function failAttempt(linkId, { errorReason = 'payment_failed_due_to_insufficient_funds', method = 'card' } = {}) {
+    const link = links.get(linkId);
+    if (!link) throw new Error(`fake: no such link ${linkId}`);
+    const payment = {
+      id: nextId('pay'),
+      entity: 'payment',
+      amount: link.amount,
+      currency: 'INR',
+      status: 'failed',
+      method,
+      order_id: nextId('order'),
+      notes: { ...link.notes },
+      error_code: 'BAD_REQUEST_ERROR',
+      error_description: 'Your payment could not be completed as the card has insufficient funds.',
+      error_source: 'bank',
+      error_step: 'payment_authorization',
+      error_reason: errorReason,
+      created_at: unix(),
+    };
+    payments.set(payment.id, payment);
+    // Deliberately NOT touching link.amount_paid or link.status, and deliberately NOT pushing
+    // onto link.payments. This is the whole point of the fixture.
+    return payment;
+  }
+
   function createOrder(body) {
     if (!body.amount || body.amount < 100) {
       return json(400, errorBody('BAD_REQUEST_ERROR', 'The amount must be atleast INR 1.00', { field: 'amount' }));
@@ -244,12 +285,24 @@ export function createFakeRazorpay({ now = () => new Date() } = {}) {
       return payment ? json(200, payment) : json(400, errorBody('BAD_REQUEST_ERROR', 'The id provided does not exist'));
     }
 
+    // List payments, newest first. The envelope is `items` here and `payment_links` on
+    // /payment_links — an inconsistency in the real API that cost me a live-run failure, so it
+    // is reproduced rather than smoothed over. Worth stating plainly: I have CONFIRMED the
+    // `payment_links` envelope against the real API but NOT this one, so the parser accepts
+    // either and the live run is what will settle it.
+    if (method === 'GET' && path === '/payments') {
+      const count = Number(u.searchParams.get('count') ?? 10);
+      const rows = [...payments.values()].sort((a, b) => b.created_at - a.created_at).slice(0, count);
+      return json(200, { entity: 'collection', count: rows.length, items: rows });
+    }
+
     return json(404, errorBody('BAD_REQUEST_ERROR', `The requested URL was not found on the server: ${method} ${path}`));
   }
 
   return {
     fetchImpl,
     payLink,
+    failAttempt,
     faults,
     // Inspection helpers for assertions — a test should be able to check what Razorpay
     // would have stored, not merely what our client claimed.

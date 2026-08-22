@@ -1,0 +1,52 @@
+{
+  "runId": "live_mt4fnqrj_7029",
+  "at": "2026-08-22T13:47:45.774Z",
+  "keyIdPrefix": "rzp_test_***",
+  "mode": "LIVE_TEST",
+  "results": [
+    {
+      "id": "REDACT",
+      "belief": "redact() removes the REAL key and secret, not just test-shaped fixtures",
+      "held": true,
+      "detail": "{\"authorization\":\"***\",\"note\":\"a log line that accidentally interpolated rzp_test_***\",\"key_secret\":\"***\"}",
+      "fatal": true,
+      "pending": false
+    },
+    {
+      "id": "AUTH",
+      "belief": "the key pair authenticates against api.razorpay.com",
+      "held": true,
+      "detail": "HTTP 200, key rzp_test_***...",
+      "fatal": true,
+      "pending": false
+    },
+    {
+      "id": "RECOVERED",
+      "belief": "a paid test-mode link reads back as CAPTURED with the amount that arrived",
+      "held": null,
+      "detail": "status=created paid=0 of 49900 reference=rbd_SL1_vecheck1_58a43c528f — the link is unpaid, so this proves nothing either way yet",
+      "fatal": false,
+      "pending": true
+    }
+  ],
+  "httpCalls": [
+    {
+      "event": "http",
+      "method": "GET",
+      "path": "/payment_links",
+      "status": 200,
+      "attempt": 1,
+      "ms": 918,
+      "requestId": null
+    },
+    {
+      "event": "http",
+      "method": "GET",
+      "path": "/payment_links/plink_TSpUdX79ucaa45",
+      "status": 200,
+      "attempt": 1,
+      "ms": 270,
+      "requestId": null
+    }
+  ]
+}

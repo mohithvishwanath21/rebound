@@ -394,6 +394,102 @@ function checkRedactionOnTheRealKey(ctx) {
  * statement. A check that cries wolf about my own beliefs is worse than no check, because the
  * whole value of this command is that its verdicts can be trusted.
  */
+/**
+ * WHY DID NOTHING ARRIVE? — a diagnostic, and a deliberate admission of ignorance.
+ *
+ * `status=created paid=0` covers two situations that could not be more different:
+ *
+ *   a) nobody ever opened the checkout page
+ *   b) somebody opened it and the payment was declined
+ *
+ * (b) is not a footnote. It is the exact event this entire project exists to recover from, and
+ * Razorpay's `error_code` / `error_reason` on a failed payment is the raw material the diagnosis
+ * layer consumes. A reconciler for a recovery product that cannot tell "no attempt" from "failed
+ * attempt" is missing the one distinction its domain is about.
+ *
+ * So this asks. Two places, because I do not know which one answers:
+ *
+ *   1. the link's own `payments` array, which may or may not include failures
+ *   2. the account's recent payments, which definitely includes failures but has to be joined
+ *      back to this link by our own `notes.rebound_ref` — which is precisely why that note is
+ *      stamped on every request in the first place
+ *
+ * It lives in the CLI rather than the gateway on purpose: production learns about failures from
+ * webhooks, not by polling a list endpoint. This is an operator's magnifying glass, and putting
+ * it in the gateway would imply the agent may poll for truth, which it may not.
+ */
+async function explainWhyNothingArrived(ctx, view) {
+  const { ledger, http } = ctx;
+
+  const onLink = Array.isArray(view.attempts) ? view.attempts : [];
+  const createdAt = Number(view.raw?.created_at ?? 0);
+
+  /** Recent account payments, joined back to this link by our own note or by amount+time. */
+  let matched = [];
+  let listWorked = false;
+  try {
+    const { body } = await http.get('/payments', { query: { count: 20 } });
+    // Either envelope. `/payment_links` answers with `payment_links` while the documented
+    // shape for collections is `items`; having been burned by exactly this once, the parser
+    // accepts both rather than betting on which one this endpoint uses.
+    const rows = Array.isArray(body?.items) ? body.items : Array.isArray(body?.payments) ? body.payments : [];
+    listWorked = true;
+    matched = rows.filter((p) => {
+      if (p?.notes?.rebound_ref && p.notes.rebound_ref === view.referenceId) return true;
+      // Fallback join: same amount, created after the link. Weaker, so it is labelled as such
+      // in the output rather than presented as a confirmed match.
+      return p?.amount === view.amountPaise && Number(p?.created_at ?? 0) >= createdAt;
+    });
+  } catch (e) {
+    say(yellow(`    !! could not list recent payments: ${safe(e.message)}`));
+  }
+
+  const failures = [...onLink, ...matched].filter((p) => p?.status === 'failed' || p?.error_code);
+
+  if (failures.length) {
+    say(bold('\n  Somebody DID try to pay, and Razorpay declined it:'));
+    for (const f of failures) {
+      const id = f.payment_id ?? f.id ?? '(no id)';
+      say(`    ${id}  method=${f.method ?? '?'}  status=${f.status ?? '?'}`);
+      say(dim(`      error_code=${f.error_code ?? '-'}  reason=${f.error_reason ?? '-'}`));
+      if (f.error_description) say(dim(`      ${safe(f.error_description)}`));
+    }
+    ledger.record({
+      id: 'ATTEMPT_VISIBLE',
+      belief: 'a declined attempt on a link is discoverable, with the decline reason attached',
+      held: true,
+      detail: failures
+        .map((f) => `${f.status ?? '?'}/${f.error_code ?? '-'}/${f.error_reason ?? '-'}`)
+        .join(' '),
+      fatal: false,
+    });
+    return;
+  }
+
+  ledger.record({
+    id: 'ATTEMPT_VISIBLE',
+    belief: 'a declined attempt on a link is discoverable, with the decline reason attached',
+    // Not false. Zero attempts is the expected reading when nobody has opened the page, and
+    // this run cannot separate that from "failures are invisible here". Recording it as
+    // contradicted would be the same lie the RECOVERED check used to tell.
+    held: null,
+    pending: true,
+    detail: `link.payments=${onLink.length} matched_account_payments=${matched.length} list_endpoint=${
+      listWorked ? 'ok' : 'unavailable'
+    } — no attempt found, which is inconclusive`,
+    fatal: false,
+  });
+
+  say(dim(`\n  Razorpay reports no payment records against this link`));
+  say(dim(`    link.payments: ${onLink.length}   recent account payments matching it: ${matched.length}`));
+  say(
+    dim(
+      '    Consistent with the page never having been opened. It is NOT proof of that — I have\n' +
+        '    not yet seen a declined attempt on a link, so I cannot say whether one would appear here.'
+    )
+  );
+}
+
 async function reconcile(ctx, providerRef) {
   const { ledger, gw } = ctx;
   say(bold(`\nReconciling ${providerRef}\n`));
@@ -414,6 +510,8 @@ async function reconcile(ctx, providerRef) {
       detail: `${detail} — the link is unpaid, so this proves nothing either way yet`,
       fatal: false,
     });
+    // Before telling the operator to go and pay it, find out whether they already tried.
+    await explainWhyNothingArrived(ctx, view);
     say(
       yellow(
         `\n  Not paid yet, so there is nothing to reconcile. This is NOT a failed belief —\n` +

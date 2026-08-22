@@ -603,3 +603,58 @@ teaches them to discount the tool. "Not tested yet" and "tested and failed" are 
 states, and any harness that reports on beliefs needs a way to say the first one out loud.
 
 ---
+
+## [Day 3] My reconciler was blind to the one event the product is about
+
+**Symptom:** After fixing the PENDING bug, the reconciler ran twice more against the real API and
+said the same thing both times:
+
+```
+  PENDING      RECOVERED  status=created paid=0 of 49900
+```
+
+Correct, and useless. I could not tell from it whether the checkout page had never been opened or
+whether it had been opened and the card declined.
+
+**Root cause:** A payment link sits at `status: created` with `amount_paid: 0` in both cases.
+Razorpay has no separate status for "attempted and failed" on the link entity, so the two
+situations are genuinely indistinguishable *from the link alone* — and the link was the only thing
+I was looking at.
+
+The uncomfortable part is which distinction I dropped. Rebound is a payment-failure recovery
+system; a declined attempt with an `error_reason` attached is the input event of the entire
+product, and the decline vocabulary is exactly what the diagnosis layer is supposed to classify. I
+built a reconciler for a recovery tool that could not see a failed payment. Not a subtle gap — a
+blind spot pointing directly at the domain.
+
+**Fix:** `explainWhyNothingArrived()` now asks two sources whenever nothing has arrived: the link's
+own `payments` array, and the account's recent payments joined back to this link by the
+`notes.rebound_ref` we stamp on every request. That note existed for webhook correlation; this is
+the second thing it has paid for. When a decline is found the run prints `error_code`,
+`error_reason` and the description, and records `ATTEMPT_VISIBLE` as confirmed. When nothing is
+found it records PENDING and says, in as many words, that an empty result is *consistent with*
+nobody having opened the page but is **not proof of it**, because I have not yet observed a
+declined attempt and do not know whether one would appear there.
+
+Three supporting decisions worth naming. The diagnostic lives in the CLI, not the gateway:
+production learns about failures from webhooks, and putting a polling query on the gateway would
+imply the agent may go fishing for truth, which the architecture forbids. It degrades rather than
+crashes — a test kills the list endpoint and asserts the main verdict survives, because a
+diagnostic that can break the command it is diagnosing is worse than none. And the fake now models
+a decline as "link untouched, failed payment on the account, nothing appended to `link.payments`",
+which is a *belief* about Razorpay, labelled as one in the fixture comment.
+
+**Lesson:** Two lessons, and the second is the one I want to keep.
+
+The narrow one: when a provider's status field cannot distinguish two states you care about, the
+answer is another query, not a cleverer reading of the same field.
+
+The broader one is about where to look for blind spots. I found the `amountPaise` bug, the
+`idempotent` bug and the PENDING bug by asking "could this label be covering two things?" — a
+question about names. This one needed a different question: "what does my domain care about that
+my tool cannot see?" I had tested the reconciler thoroughly against everything it did. Nothing in
+a green suite, or in the name of a variable, was ever going to point at the case I had not
+modelled at all. Coverage measures the code you wrote; it is silent about the code you did not
+think to write.
+
+---

@@ -307,6 +307,76 @@ test('--reconcile on a link where money arrived but the status disagrees IS cont
   assert.match(output, /Fix the code, not the fake/);
 });
 
+/**
+ * The distinction this project is actually about. `status=created paid=0` is what BOTH of these
+ * look like on the link itself:
+ *
+ *   - nobody opened the checkout page
+ *   - somebody opened it and the card was declined
+ *
+ * The second one is the event Rebound exists to recover from, so a reconciler that reports them
+ * identically is blind in its own domain. These two tests pin both readings.
+ */
+test('--reconcile surfaces a declined attempt and the reason Razorpay gave', async () => {
+  const fake = createFakeRazorpay();
+  await runCli({ fake });
+  const linkId = [...fake.links.keys()][0];
+  fake.failAttempt(linkId, { errorReason: 'payment_failed_due_to_insufficient_funds' });
+
+  const { code, results, output } = await runCli({ fake, argv: ['--reconcile', linkId] });
+
+  // The link still says nothing happened, which is exactly why the account has to be asked.
+  assert.equal(fake.links.get(linkId).status, 'created');
+  assert.equal(fake.links.get(linkId).amount_paid, 0);
+
+  assert.match(output, /Somebody DID try to pay/);
+  assert.match(output, /payment_failed_due_to_insufficient_funds/, 'the decline reason is the point');
+  const attempt = byId(results, 'ATTEMPT_VISIBLE');
+  assert.equal(attempt.held, true, 'a discoverable decline confirms the belief');
+  assert.equal(attempt.pending, false);
+  // Still no money, so RECOVERED remains pending and the run still exits 2 rather than 0.
+  assert.equal(byId(results, 'RECOVERED').pending, true);
+  assert.equal(code, 2);
+});
+
+test('--reconcile with no attempt at all says so WITHOUT claiming the page was never opened', async () => {
+  const fake = createFakeRazorpay();
+  await runCli({ fake });
+  const linkId = [...fake.links.keys()][0];
+
+  const { results, output } = await runCli({ fake, argv: ['--reconcile', linkId] });
+  const attempt = byId(results, 'ATTEMPT_VISIBLE');
+
+  assert.equal(attempt.pending, true, 'zero attempts is inconclusive, not a contradicted belief');
+  assert.equal(attempt.held, null);
+  assert.match(output, /no payment records against this link/);
+  assert.match(output, /NOT proof of that/, 'the limit of what this observes must be stated');
+  assert.ok(!/Somebody DID try to pay/.test(output));
+});
+
+test('--reconcile still works when the payments list endpoint is unavailable', async () => {
+  const fake = createFakeRazorpay();
+  await runCli({ fake });
+  const linkId = [...fake.links.keys()][0];
+
+  // A diagnostic that can crash the command it is diagnosing is worse than no diagnostic.
+  const listBroken = {
+    ...fake,
+    fetchImpl: async (url, init) => {
+      const u = new URL(url);
+      if ((init?.method ?? 'GET') === 'GET' && u.pathname.endsWith('/payments')) {
+        throw Object.assign(new Error('timeout'), { name: 'TimeoutError' });
+      }
+      return fake.fetchImpl(url, init);
+    },
+  };
+
+  const { code, results } = await runCli({ fake: listBroken, argv: ['--reconcile', linkId] });
+  assert.equal(byId(results, 'RECOVERED').pending, true, 'the main verdict must survive');
+  assert.match(byId(results, 'ATTEMPT_VISIBLE').detail, /list_endpoint=unavailable/);
+  assert.equal(code, 2, 'a broken diagnostic must not turn into a contradicted belief');
+});
+
 test('--help prints usage and touches nothing', async () => {
   const fake = createFakeRazorpay();
   const { code, results, output } = await runCli({ fake, argv: ['--help'] });
