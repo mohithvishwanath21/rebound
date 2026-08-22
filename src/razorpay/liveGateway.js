@@ -118,12 +118,54 @@ export function createLiveGateway({
     });
   }
 
-  /** The reconciliation path: ask Razorpay whether our reference already exists. */
+  /**
+   * The reconciliation path: ask Razorpay whether our reference already exists.
+   *
+   * Two things here are defensive as a direct result of the 2026-08-22 live run, where this
+   * returned null for a reference that demonstrably existed — Razorpay had just refused to
+   * duplicate it.
+   *
+   * 1. THE ENVELOPE KEY. Most Razorpay collections come back as `{count, entity, items}`, and
+   *    I assumed payment links did too. The list endpoint returned 200 with no `items`, so an
+   *    existing link read as absent. Their fetch-all-payment-links response uses
+   *    `payment_links` as the array key instead, so both are accepted. Reading `body.items`
+   *    and finding nothing is indistinguishable from "no such link" — a silent wrong answer
+   *    rather than an error, which is why it survived a passing offline suite.
+   *
+   * 2. NO TRUSTING THE SERVER-SIDE FILTER. The original returned `items[0]` on the assumption
+   *    that `?reference_id=` had filtered. If that parameter is ignored rather than honoured,
+   *    an unfiltered list comes back and `items[0]` is SOMEONE ELSE'S PAYMENT LINK — which
+   *    this function would then hand back as the replay of our decision, attaching a stranger's
+   *    amount and status to our audit trail. That is far worse than returning null. So the
+   *    match is re-verified locally on the exact reference, and the server filter is treated as
+   *    an optimisation, never as a guarantee.
+   */
   async function findByReference(reference) {
     try {
       const { body } = await http.get('/payment_links', { query: { reference_id: reference } });
-      const items = body?.items ?? [];
-      return items.length ? items[0] : null;
+
+      const collection = Array.isArray(body?.payment_links)
+        ? body.payment_links
+        : Array.isArray(body?.items)
+          ? body.items
+          : [];
+
+      // Verify locally rather than trusting that the query filtered.
+      const match = collection.find((l) => l?.reference_id === reference) ?? null;
+
+      if (!match) {
+        // A diagnostic, not a log for its own sake: if this ever fires again the next question
+        // is always "what shape did the body actually have", and keys are safe to print where
+        // the objects themselves are not — a payment link carries customer contact details.
+        onLog?.({
+          event: 'reference_lookup_empty',
+          reference,
+          bodyKeys: body && typeof body === 'object' ? Object.keys(body) : typeof body,
+          collectionLength: collection.length,
+          note: 'refused as duplicate but not findable — see findByReference',
+        });
+      }
+      return match;
     } catch (e) {
       if (e instanceof RazorpayNotFoundError) return null;
       throw e;

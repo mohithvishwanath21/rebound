@@ -212,7 +212,18 @@ export function createFakeRazorpay({ now = () => new Date() } = {}) {
       const ref = u.searchParams.get('reference_id');
       const id = ref ? byReference.get(ref) : null;
       const items = id ? [links.get(id)] : [];
-      return json(200, { count: items.length, entity: 'collection', items });
+      // `payment_links`, not `items`.
+      //
+      // The 2026-08-22 live run refused a duplicate and then could not find the link it had
+      // just refused to duplicate, because the gateway read `body.items` — the envelope every
+      // OTHER Razorpay collection uses. This fixture used `items` too, so the belief and the
+      // fake were wrong together and the offline suite was perfectly happy.
+      //
+      // `count` is kept because it costs nothing, but note the gateway no longer trusts the
+      // server-side filter at all: it re-matches on reference_id locally, because a filter
+      // that is ignored rather than honoured would otherwise hand back a stranger's link as
+      // the replay of our own decision.
+      return json(200, { count: items.length, entity: 'collection', payment_links: items });
     }
 
     if (method === 'GET' && path.startsWith('/payment_links/')) {

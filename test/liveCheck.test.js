@@ -111,9 +111,15 @@ test('a refused duplicate that cannot be located fails B1b but not B1', async ()
     fetchImpl: async (url, init) => {
       const u = new URL(url);
       // Uniqueness still enforced; the reference_id filter simply returns nothing, which is
-      // the world where GET /payment_links?reference_id= does not filter the way I assume.
+      // the world where GET /payment_links?reference_id= does not resolve our link.
+      // Response shape mirrors the fake's own — text(), no json() — since the client parses text.
       if ((init?.method ?? 'GET') === 'GET' && u.pathname.endsWith('/payment_links') && u.searchParams.get('reference_id')) {
-        return { ok: true, status: 200, headers: new Map(), json: async () => ({ count: 0, entity: 'collection', items: [] }), text: async () => '{"count":0,"items":[]}' };
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => null, forEach: () => {} },
+          text: async () => JSON.stringify({ count: 0, entity: 'collection', payment_links: [] }),
+        };
       }
       return fake.fetchImpl(url, init);
     },

@@ -454,3 +454,89 @@ fixture while writing this (20 characters while asserting 21), which is a decent
 having the machine count rather than the person.
 
 ---
+
+## [Day 3] Razorpay refused to duplicate a link, then told me that link did not exist
+
+**Symptom:** Second live run, and this time the duplicate refusal was recognised correctly — B1
+CONFIRMED. But the very next line:
+
+```
+CONFIRMED    B1   Razorpay REJECTS a duplicate reference_id on payment links
+                  the duplicate was refused (receipt state=UNKNOWN)
+UNVERIFIED   B1b  after a refusal we can locate the existing link by reference_id
+                  refused, but the lookup did not resolve it: code=DUPLICATE_NOT_FOUND
+```
+
+Razorpay had just refused to create a second link *because one already existed*, and the
+follow-up `GET /payment_links?reference_id=…` returned 200 with nothing in it. Two statements
+from the same API, one minute apart, that cannot both be true.
+
+**First hypothesis:** That `?reference_id=` is not a supported filter and was being ignored. But
+an ignored filter returns the *unfiltered* list, which on this account is non-empty. Empty is
+not what "ignored" looks like.
+
+**Root cause:** I read the wrong key off the response. Most Razorpay collections come back as
+`{count, entity, items}`, so I wrote `body?.items ?? []` and never questioned it. The
+fetch-all-payment-links response puts the array under **`payment_links`**. So `items` was
+`undefined`, the fallback made it `[]`, and a link that demonstrably existed read as absent.
+
+Two things made this survive to a live run. My fake used `items` as well, because the same
+assumption wrote both. And nothing earlier had ever inspected a *list* body: `AUTH` calls
+`GET /payment_links?count=1` but only asserts `status === 200`, and the `JOIN` check fetches a
+single link by id, which returns the object directly. The list envelope had no coverage
+anywhere despite being requested on every run.
+
+**Fix:** Accept either key, and — the more important half — **stop trusting the server-side
+filter entirely.** The original returned `items[0]` on the assumption the query had filtered. If
+that parameter is ever ignored, an unfiltered list comes back and `items[0]` is *somebody
+else's payment link*, which this function would hand back as the replay of our decision,
+attaching a stranger's amount and paid status to our audit trail. A wrong recovery number is
+worse than a missing one, so the match is now re-verified locally against the exact reference
+and the server filter is treated as an optimisation. There is a test that feeds the lookup a
+decoy paid link for ₹9,999.99 and asserts the receipt comes back UNKNOWN with zero collected.
+
+Also added a `reference_lookup_empty` diagnostic that logs the response's *keys* — safe to
+print, where the objects are not, since a payment link carries customer contact details.
+
+**Lesson:** A missing key and an empty result are indistinguishable once `?? []` sits between
+them, and that idiom turns "I misunderstood the response" into "there is nothing there" —
+silently, with a 200. Where a lookup drives a money decision, absence deserves to be
+distinguished from misparse; the diagnostic exists so the next occurrence answers "what shape
+was it actually" without another round trip. And the wider pattern, third time now: I keep
+generalising one endpoint's behaviour to a sibling endpoint. Unique `reference_id` on links did
+not imply unique `receipt` on orders; `{items}` on other collections did not imply `{items}` on
+payment links. Consistency across an API is a hope, not a specification.
+
+---
+
+## [Day 3] Worked on POSIX, wrote to C:\C:\ on Windows
+
+**Symptom:** Every check passed, the payment link printed, and then the last line of the run:
+
+```
+live-check failed: ENOENT: no such file or directory,
+  mkdir 'C:\C:\MohithFiles\OldLaptopFiles\Rebound\rebound\docs\evidence'
+```
+
+**Root cause:** `new URL('../../../docs/evidence/', import.meta.url).pathname`. On Windows that
+yields `/C:/MohithFiles/…` — with a leading slash, which makes it look like a relative path, so
+`mkdirSync` resolved it against the drive and produced the doubled `C:\C:\`. On POSIX the same
+expression is simply correct, which is exactly why it shipped: my whole test suite runs on
+Linux, and this is a bug that only exists on the machine the operator is actually using.
+
+**Fix:** `fileURLToPath()`, which is the function that exists for this — it handles the drive
+letter, the leading slash, and percent-decoding, so a path containing a space would also have
+broken the old version. Plus `path.join` instead of string concatenation, so a directory passed
+without a trailing separator works. Same for the pretty-printed path in the summary line, which
+matched only forward slashes.
+
+**Lesson:** `URL.pathname` is not a filesystem path, it is a URL component that resembles one on
+one family of operating systems. Any time a file path is derived from `import.meta.url`, it goes
+through `fileURLToPath` — no exceptions, because the failure is invisible on the machine where
+the tests run. Worth noting honestly: **I could not verify this fix myself.** My sandbox is
+Linux, where `fileURLToPath` on a `file:///C:/…` URL returns the same string as `.pathname`, so
+the two are indistinguishable here. The fix is the documented one and I am confident in it, but
+the confirmation had to come from the Windows run — a reminder that "my tests pass" is scoped
+to the platform they passed on.
+
+---

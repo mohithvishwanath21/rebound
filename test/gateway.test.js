@@ -155,6 +155,94 @@ test('[LIVE_TEST] a genuine duplicate resolves to a replay receipt, not an error
   assert.equal(fake.links.size, 1, 'Razorpay must hold exactly one link — no duplicate was created');
 });
 
+/**
+ * Both of these pin lessons from the first real run rather than hypotheticals.
+ *
+ * The list endpoint returned an envelope I did not expect, and the reference lookup read the
+ * wrong key — so a link that provably existed came back as absent. A wrong answer, not an
+ * error, which is the kind that survives a green suite.
+ */
+/**
+ * Wrap a fake's transport, rewriting only the reference-lookup response.
+ *
+ * Note it mirrors the fake's own response shape — `text()` and a `headers.get`, no `json()` —
+ * because the client parses text rather than calling `.json()`. Inventing a `json()` method
+ * here produced a NETWORK error rather than an obvious "your stub is wrong", which is a small
+ * lesson in its own right: a hand-built stub that diverges from the thing it stands in for
+ * fails as a transport error, not as a type error.
+ */
+function withRewrittenLookup(fake, rewrite) {
+  const stub = (body) => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => null, forEach: () => {} },
+    text: async () => JSON.stringify(body),
+  });
+
+  return async (url, init) => {
+    const u = new URL(url);
+    const isLookup =
+      (init?.method ?? 'GET') === 'GET' && u.pathname.endsWith('/payment_links') && u.searchParams.get('reference_id');
+    if (!isLookup) return fake.fetchImpl(url, init);
+
+    const res = await fake.fetchImpl(url, init);
+    const original = JSON.parse(await res.text());
+    return stub(rewrite(original.payment_links ?? original.items ?? []));
+  };
+}
+
+test('[LIVE_TEST] the reference lookup accepts either collection envelope', async () => {
+  for (const key of ['payment_links', 'items']) {
+    const fake = createFakeRazorpay({ now: () => NOW });
+    const gw = createLiveGateway({
+      keyId: KEY_ID,
+      keySecret: KEY_SECRET,
+      fetchImpl: withRewrittenLookup(fake, (rows) => ({ count: rows.length, [key]: rows })),
+      sleep: async () => {},
+      now: () => NOW,
+    });
+
+    const first = await gw.sendPaymentLink(requestFor({ decisionSeq: 9 }));
+    const second = await gw.sendPaymentLink(requestFor({ decisionSeq: 9 }));
+    assert.equal(second.replayed, true, `envelope key '${key}' must still resolve the replay`);
+    assert.equal(second.providerRef, first.providerRef);
+  }
+});
+
+/**
+ * The dangerous half. If `?reference_id=` is ignored rather than honoured, an unfiltered list
+ * comes back, and taking items[0] would attach a STRANGER'S payment link — their amount, their
+ * status — to our decision's audit trail as a successful replay. Returning UNKNOWN is correct;
+ * returning someone else's money is not.
+ */
+test('[LIVE_TEST] an ignored server-side filter must not yield somebody else\'s link', async () => {
+  const fake = createFakeRazorpay({ now: () => NOW });
+  const decoy = {
+    id: 'plink_SomeoneElse',
+    entity: 'payment_link',
+    reference_id: 'rbd_NOT_OUR_REFERENCE',
+    amount: 999999,
+    amount_paid: 999999,
+    status: 'paid',
+    short_url: 'https://rzp.io/i/decoy',
+  };
+  const gw = createLiveGateway({
+    keyId: KEY_ID,
+    keySecret: KEY_SECRET,
+    // The lookup always answers with a link that is NOT ours — i.e. the filter was ignored.
+    fetchImpl: withRewrittenLookup(fake, () => ({ count: 1, payment_links: [decoy] })),
+    sleep: async () => {},
+    now: () => NOW,
+  });
+
+  await gw.sendPaymentLink(requestFor({ decisionSeq: 11 }));
+  const second = await gw.sendPaymentLink(requestFor({ decisionSeq: 11 }));
+
+  assert.notEqual(second.providerRef, 'plink_SomeoneElse', 'a stranger link must never be reported as our replay');
+  assert.equal(second.state, ReceiptState.UNKNOWN, 'unconfirmable is the honest answer here');
+  assert.equal(second.amountCollectedPaise, 0, 'and above all it must not book their 9999.99 as our recovery');
+});
+
 test('[LIVE_TEST] Razorpay enforces unique reference_id on links but NOT unique receipt on orders', async () => {
   const { gw, fake } = liveWithFake();
   // Two identical retries produce two orders, because Razorpay does not dedupe `receipt`.

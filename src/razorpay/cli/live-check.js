@@ -46,7 +46,8 @@
  */
 
 import { writeFileSync, mkdirSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { loadEnv, requireEnv } from '../../core/env.js';
 import { createRazorpayClient, redact } from '../httpClient.js';
 import { createLiveGateway } from '../liveGateway.js';
@@ -398,10 +399,18 @@ async function reconcile(ctx, providerRef) {
  * depend on. Redacted before writing, not after — the file is meant to be committable.
  */
 function writeEvidence(summary, { dir } = {}) {
-  const target = dir ?? new URL('../../../docs/evidence/', import.meta.url).pathname;
+  // fileURLToPath, NOT `new URL(...).pathname`.
+  //
+  // On Windows `.pathname` yields '/C:/MohithFiles/…' — with a leading slash, which makes it
+  // look relative, so mkdirSync resolved it against the drive and tried to create
+  // 'C:\C:\MohithFiles\…\docs\evidence'. It works perfectly on POSIX, which is exactly why it
+  // shipped. fileURLToPath is the function that exists for this: it handles the drive letter,
+  // the leading slash, and percent-decoding (a path containing a space would also have failed).
+  const target = dir ?? fileURLToPath(new URL('../../../docs/evidence/', import.meta.url));
   mkdirSync(target, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const path = `${target}live-check-${stamp}.json`;
+  // join rather than concatenation, so a `dir` passed without a trailing separator works.
+  const path = join(target, `live-check-${stamp}.json`);
   writeFileSync(path, `${JSON.stringify(redact(summary), null, 2)}\n`);
   return path;
 }
@@ -524,7 +533,8 @@ export async function main({ argv = process.argv.slice(2), fetchImpl, sleep, evi
     },
     { dir: evidenceDir }
   );
-  say(dim(`\n  evidence written to ${evidence.replace(/^.*\/docs\//, 'docs/')}`));
+  // Both separators, because this same line printed an absolute Windows path before.
+  say(dim(`\n  evidence written to ${evidence.replace(/^.*[/\\]docs[/\\]/, 'docs/')}`));
 
   // The claim boundary, restated every run so it cannot drift from what the code did.
   say(dim('\n  What this proves: the integration works against the real API — auth, creation,'));
