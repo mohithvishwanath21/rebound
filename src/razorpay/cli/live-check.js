@@ -418,31 +418,89 @@ function checkRedactionOnTheRealKey(ctx) {
  * webhooks, not by polling a list endpoint. This is an operator's magnifying glass, and putting
  * it in the gateway would imply the agent may poll for truth, which it may not.
  */
-async function explainWhyNothingArrived(ctx, view) {
-  const { ledger, http } = ctx;
-
-  const onLink = Array.isArray(view.attempts) ? view.attempts : [];
+/**
+ * Recent account payments, joined back to this link. Extracted because both the "nothing
+ * arrived" and the "something arrived" paths need the same join, and a join written twice is a
+ * join that will diverge.
+ *
+ * The primary key is our own `notes.rebound_ref`, stamped on every request precisely so this
+ * works. The amount+time fallback is weaker and callers label it as such.
+ */
+async function findAccountPayments(ctx, view) {
   const createdAt = Number(view.raw?.created_at ?? 0);
-
-  /** Recent account payments, joined back to this link by our own note or by amount+time. */
-  let matched = [];
-  let listWorked = false;
   try {
-    const { body } = await http.get('/payments', { query: { count: 20 } });
+    const { body } = await ctx.http.get('/payments', { query: { count: 20 } });
     // Either envelope. `/payment_links` answers with `payment_links` while the documented
     // shape for collections is `items`; having been burned by exactly this once, the parser
     // accepts both rather than betting on which one this endpoint uses.
     const rows = Array.isArray(body?.items) ? body.items : Array.isArray(body?.payments) ? body.payments : [];
-    listWorked = true;
-    matched = rows.filter((p) => {
-      if (p?.notes?.rebound_ref && p.notes.rebound_ref === view.referenceId) return true;
-      // Fallback join: same amount, created after the link. Weaker, so it is labelled as such
-      // in the output rather than presented as a confirmed match.
-      return p?.amount === view.amountPaise && Number(p?.created_at ?? 0) >= createdAt;
-    });
+    return {
+      listWorked: true,
+      matched: rows.filter((p) => {
+        if (p?.notes?.rebound_ref && p.notes.rebound_ref === view.referenceId) return true;
+        return p?.amount === view.amountPaise && Number(p?.created_at ?? 0) >= createdAt;
+      }),
+    };
   } catch (e) {
     say(yellow(`    !! could not list recent payments: ${safe(e.message)}`));
+    return { listWorked: false, matched: [] };
   }
+}
+
+/**
+ * HOW did the money arrive? — the other half of `explainWhyNothingArrived`.
+ *
+ * `RECOVERED` proves a rupee moved. It does not say by what mechanism, and the mechanism is the
+ * claim this project is actually making. The first real recovery on this account was preceded by
+ * two card declines for `international_transaction_not_allowed` and then succeeded on a different
+ * rail — which is a live demonstration of the thesis, and the evidence file recorded none of it.
+ *
+ * A number without its mechanism is a number I cannot defend in an interview, so the run now
+ * records the method that worked alongside the amount.
+ */
+async function describeHowItArrived(ctx, view) {
+  const { ledger } = ctx;
+  const onLink = (Array.isArray(view.attempts) ? view.attempts : []).filter(
+    (p) => p?.status === 'captured' || p?.status === 'authorized'
+  );
+  // Successful payments are documented as appearing on the link entity. Failures provably do not
+  // (observed link=0 account=2), so this is the complement of that finding and worth recording
+  // rather than assuming symmetry — the asymmetry is exactly what caught me out last time.
+  const { matched, listWorked } = onLink.length ? { matched: [], listWorked: null } : await findAccountPayments(ctx, view);
+  const captured = onLink.length ? onLink : matched.filter((p) => p?.status === 'captured');
+
+  if (!captured.length) {
+    ledger.record({
+      id: 'RECOVERED_VIA',
+      belief: 'the payment method that recovered the money is recoverable from the audit trail',
+      held: null,
+      pending: true,
+      detail: `link_payments=${onLink.length} account_matches=${matched.length} list_endpoint=${listWorked ?? 'not_queried'}`,
+      fatal: false,
+    });
+    say(dim('\n  Money arrived, but I could not identify which method delivered it.'));
+    return;
+  }
+
+  const methods = [...new Set(captured.map((p) => p.method ?? 'unknown'))];
+  say(bold('\n  Recovered via:'));
+  for (const p of captured) {
+    say(`    ${p.payment_id ?? p.id ?? '(no id)'}  method=${p.method ?? '?'}  amount=${p.amount}`);
+  }
+  ledger.record({
+    id: 'RECOVERED_VIA',
+    belief: 'the payment method that recovered the money is recoverable from the audit trail',
+    held: true,
+    detail: `method=${methods.join('+')} seen_in=${onLink.length ? 'link' : 'account'}`,
+    fatal: false,
+  });
+}
+
+async function explainWhyNothingArrived(ctx, view) {
+  const { ledger } = ctx;
+
+  const onLink = Array.isArray(view.attempts) ? view.attempts : [];
+  const { matched, listWorked } = await findAccountPayments(ctx, view);
 
   /**
    * MERGE BY PAYMENT ID, and remember which source each one came from.
@@ -575,6 +633,9 @@ async function reconcile(ctx, providerRef) {
       : `${detail} — money arrived but the link did not read back as CAPTURED, which contradicts the mapping in liveGateway`,
     fatal: true,
   });
+
+  // A recovered rupee is only half the claim; the mechanism that recovered it is the other half.
+  if (captured && somethingArrived) await describeHowItArrived(ctx, view);
 
   return view;
 }

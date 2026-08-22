@@ -146,6 +146,21 @@ export function createFakeRazorpay({ now = () => new Date() } = {}) {
     link.amount_paid = paid;
     link.status = paid >= link.amount ? 'paid' : 'partially_paid';
     link.updated_at = unix();
+    // A SUCCESSFUL payment is appended to the link entity. This is the documented behaviour and
+    // the deliberate asymmetry with `failAttempt`, which appends nothing — an asymmetry confirmed
+    // from the failure side on 2026-08-22 (`link=0 account=2`) but still only *believed* from the
+    // success side. If a real run reports `seen_in=account` for a capture, this fixture is wrong
+    // and the log gets an entry rather than the fixture getting quietly relaxed.
+    link.payments = [
+      ...(Array.isArray(link.payments) ? link.payments : []),
+      {
+        payment_id: payment.id,
+        created_at: payment.created_at,
+        method: payment.method,
+        amount: payment.amount,
+        status: payment.status,
+      },
+    ];
     return { link, payment };
   }
 

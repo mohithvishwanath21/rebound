@@ -706,3 +706,52 @@ actions whose expected values are nowhere near each other. A system that respond
 the Day 4 taxonomy rather than one I made up.
 
 ---
+
+## [Day 3] ₹499 recovered for real, and the run could not say how
+
+**Symptom:** Not a bug this time — the end of Day 3. A real payment link on a real Razorpay
+test-mode account, paid, read back correctly:
+
+```
+  CONFIRMED    RECOVERED  status=paid paid=49900 of 49900 reference=rbd_SL1_vecheck1_58a43c528f
+  3 confirmed, 0 not confirmed
+```
+
+Then I looked at what that line does and does not say. It proves a rupee moved and that my code
+reads the amount back correctly. It says nothing about *how* the money arrived — and in this
+particular case, how it arrived was the whole story.
+
+The sequence on that link, from the account's own records: two card attempts, both declined with
+`international_transaction_not_allowed`, followed by one success on a different rail. Same customer,
+same ₹499, same link. A retry-and-back-off system would still be retrying that card, and it would
+never have collected the money, because nothing about the card was going to change. Switching the
+mechanism collected it on the first try.
+
+That is the thesis of this project, and it happened by accident on a live account while I was
+debugging something else. The evidence file recorded none of it.
+
+**Fix:** `describeHowItArrived()` now runs whenever `RECOVERED` holds, identifies the captured
+payment from the link's own history or from the account list, and records `RECOVERED_VIA` with the
+method. If the method cannot be determined the check is PENDING, not confirmed — an unexplained
+recovery is not a clean run, so it exits 2. The join logic that both this and the decline diagnostic
+need is now one function, because a join written twice is a join that will diverge.
+
+One asymmetry is worth flagging as a belief rather than a fact: the fake appends successful payments
+to the link entity and appends nothing for failures. The failure half is confirmed
+(`link=0 account=2`, observed). The success half is still only documented, and if a real run reports
+`seen_in=account` for a capture, the fixture is wrong and this log gets another entry — I am not
+going to assume symmetry, having been caught by an asymmetry twice already this week.
+
+**Lesson:** "Measured money recovered" is a two-part claim, and I had only instrumented the first
+part. The amount is the easy half; the mechanism is the half that distinguishes a decision engine
+from a retry loop, and it is the half a judge will ask about. More generally: when a system's whole
+argument is that *which action you choose* matters, the action taken has to be a first-class field in
+the audit trail, not something reconstructable by someone willing to cross-reference two API
+endpoints by hand.
+
+Day 3 closes with the load-bearing claim proven end to end against the real API: authentication,
+creation, remote idempotency, the reference join, redaction, a declined attempt with its reason, and
+₹499 recovered and reconciled. What is explicitly NOT proven, and is stated on every run: that the
+recovery policy is any good. That number comes from simulation, and it is next.
+
+---

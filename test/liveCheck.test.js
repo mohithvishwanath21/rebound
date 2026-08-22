@@ -446,6 +446,58 @@ test('with no decline observed, the ordinary card hint is still offered', async 
   assert.ok(!/Do NOT retry the card/.test(output));
 });
 
+/**
+ * The sentence this project most wants to be able to say is not "we recovered ₹499", it is
+ * "we recovered ₹499 by switching rails after a card decline". The first was already proven; the
+ * second was nowhere in the evidence file, so the run now records the method that worked.
+ */
+test('a recovery records which method delivered the money, not just the amount', async () => {
+  const fake = createFakeRazorpay();
+  await runCli({ fake });
+  const linkId = [...fake.links.keys()][0];
+  fake.failAttempt(linkId, { errorReason: 'international_transaction_not_allowed', method: 'card' });
+  fake.payLink(linkId); // succeeds on the link's own method
+
+  const { code, results, output } = await runCli({ fake, argv: ['--reconcile', linkId] });
+  assert.equal(byId(results, 'RECOVERED').held, true);
+  const via = byId(results, 'RECOVERED_VIA');
+  assert.equal(via.held, true, 'the mechanism must be identified, not just the amount');
+  assert.match(via.detail, /method=/);
+  assert.match(output, /Recovered via:/);
+  assert.equal(code, 0);
+});
+
+test('a recovery whose method cannot be identified says so rather than inventing one', async () => {
+  const fake = createFakeRazorpay();
+  await runCli({ fake });
+  const linkId = [...fake.links.keys()][0];
+  fake.payLink(linkId);
+  // Strip the attempt history from both sources: the link's array and the account list.
+  fake.links.get(linkId).payments = null;
+  const blind = {
+    ...fake,
+    fetchImpl: async (url, init) => {
+      const u = new URL(url);
+      if ((init?.method ?? 'GET') === 'GET' && u.pathname.endsWith('/payments')) {
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => null, forEach: () => {} },
+          text: async () => JSON.stringify({ entity: 'collection', count: 0, items: [] }),
+        };
+      }
+      return fake.fetchImpl(url, init);
+    },
+  };
+
+  const { code, results, output } = await runCli({ fake: blind, argv: ['--reconcile', linkId] });
+  assert.equal(byId(results, 'RECOVERED').held, true, 'the money still provably arrived');
+  const via = byId(results, 'RECOVERED_VIA');
+  assert.equal(via.pending, true, 'unknown mechanism is pending, not a contradicted belief');
+  assert.match(output, /could not identify which method delivered it/);
+  assert.equal(code, 2, 'an unexplained recovery is not a clean run');
+});
+
 test('--help prints usage and touches nothing', async () => {
   const fake = createFakeRazorpay();
   const { code, results, output } = await runCli({ fake, argv: ['--help'] });
