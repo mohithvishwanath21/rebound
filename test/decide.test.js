@@ -679,6 +679,89 @@ test('explainDecision is a pure function of the record', () => {
 });
 
 // =============================================================================================
+// THE TIMING LINE IN THE AUDIT TRAIL
+// =============================================================================================
+
+/**
+ * A scorer that surfaces `timing` the way `createRecoveryScorer` does for a FEATURE-BASED arm.
+ * `salaryWindow` is echoed from the slot so the assertions below are about plumbing, not about
+ * what the real model happens to believe this week.
+ */
+function timingScorer(p = 0.3) {
+  return ({ action, context }) => {
+    const scheduled = action.kind === ActionKind.RETRY_SCHEDULED && action.scheduledFor;
+    return {
+      p,
+      support: { state: 'SUPPORTED', rows: 400 },
+      timing: {
+        // Deliberately computed the way features.js does — `scheduledFor - context.now` — so this
+        // test would notice if the serving convention changed underneath it.
+        delayDays: scheduled
+          ? Math.max(0, (new Date(action.scheduledFor).getTime() - new Date(context.now).getTime()) / 86_400_000)
+          : 0,
+        isScheduled: scheduled ? 1 : 0,
+        salaryWindow: scheduled ? 1 : 0,
+      },
+    };
+  };
+}
+
+test('the trail states the scheduled delay from the timestamps, not from the inert delayDays feature', () => {
+  /**
+   * THE DEFECT THIS PINS.
+   *
+   * `decide` prices every action at the instant it LANDS, so for a scheduled retry `context.now`
+   * IS `action.scheduledFor` and the `delayDays` feature is `scheduledFor - scheduledFor` = 0,
+   * always. An explanation that read the feature printed "landing in 0.0 days" about a slot six
+   * hours out, which is false — a plausible-looking number computed from nothing, which is the one
+   * category of output this project treats as worse than no output.
+   *
+   * `effectiveAt - decidedAt` is the real delay and cannot degenerate, so that is what the line
+   * reads. Asserting BOTH here — that the feature really is 0 and that the printed delay is not —
+   * is the only way this stays pinned: assert only the printed text and a future refactor that
+   * reintroduces the feature-based delay would still pass whenever the two happen to agree.
+   */
+  const rec = decide({ scoreAction: timingScorer(0.3), candidates: [
+    { kind: ActionKind.RETRY_SCHEDULED, scheduledFor: '2026-08-26T09:30:00Z' }, // 2 days out
+  ] });
+
+  assert.equal(rec.chosen.timing.delayDays, 0, 'the feature is pinned at 0 at serving; that is the skew');
+  assert.equal(rec.chosen.timing.isScheduled, 1);
+
+  const line = rec.explain.find((l) => l.startsWith('Timing:'));
+  assert.ok(line, 'a scheduled retry must explain its timing');
+  assert.match(line, /landing in 2\.0 days/, 'the delay must come from effectiveAt - decidedAt');
+  assert.doesNotMatch(line, /landing in 0\.0 days/);
+  assert.match(line, /priced at that future slot, not now/);
+  assert.match(line, /Salary-window proximity of the slot is 1\.00/);
+});
+
+test('an action that fires now says so, and does not claim a future slot', () => {
+  const rec = decide({ scoreAction: timingScorer(0.3), candidates: [{ kind: ActionKind.RETRY_NOW }] });
+  const line = rec.explain.find((l) => l.startsWith('Timing:'));
+
+  assert.match(line, /fires now, not on a schedule/);
+  assert.doesNotMatch(line, /future slot/);
+});
+
+test('a GROUP BY arm declares that it cannot see the slot rather than staying silent', () => {
+  /**
+   * The distinction that matters: a trail with NO timing line and a trail whose timing line showed
+   * the slot did not move `p` look identical to a reader, and they are opposite claims. A lookup by
+   * (cause, action) structurally cannot see when a slot lands, so it has to say so — otherwise the
+   * absence reads as "timing was considered and did not matter".
+   */
+  const rec = decide({
+    scoreAction: scorer(0.3), // no `timing` key at all, like a lookup table
+    candidates: [{ kind: ActionKind.RETRY_SCHEDULED, scheduledFor: '2026-08-26T09:30:00Z' }],
+  });
+  const line = rec.explain.find((l) => l.startsWith('Timing:'));
+
+  assert.match(line, /cannot see when the slot lands/);
+  assert.match(line, /no timing evidence backs this probability/);
+});
+
+// =============================================================================================
 // BATCHES: value, not count
 // =============================================================================================
 

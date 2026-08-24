@@ -16,14 +16,16 @@
     "api": "node src/api/server.js",
     "eval": "node src/eval/cli/run.js",
     "test": "node --test test/*.test.js",
-    "check": "npm run test && npm run verify-sim && npm run diagnose-report && npm run model-report && npm run decide-report",
+    "check": "npm run test && npm run verify-sim && npm run diagnose-report && npm run model-report && npm run decide-report && npm run orchestrate-report",
     "diagnose-report": "node src/eval/cli/diagnose-report.js",
     "model-report": "node src/eval/cli/model-report.js",
     "decide-report": "node src/eval/cli/decide-report.js",
+    "orchestrate-report": "node src/eval/cli/orchestrate-report.js",
     "select-arm": "node src/eval/cli/select-arm.js"
   },
   "comments": {
     "scripts": [
+      "`decide-report` and `orchestrate-report` answer two different questions and both are in `check` on purpose. `decide-report` prints what the policy EXPECTS to recover — arithmetic over its own estimates, nothing executed. `orchestrate-report` runs the loop against the simulated gateway across several cycles and prints what a receipt actually said was captured. A regression that leaves the EV maths intact but breaks execution, scheduling or the guardrail ledger is invisible to the first and loud in the second.",
       "`select-arm` is deliberately NOT part of `check`. It runs a 20-world sweep and takes about 90 seconds, and `check` has to stay fast enough to run on every change. The plumbing and the statistics are covered by test/armSelection.test.js, which runs the same procedure on three tiny worlds in under two seconds; the full sweep is a deliberate act you perform when choosing which model the decision engine is built on, not a per-commit check.",
       "`select-arm` is also the only command permitted to decide that choice. `model-report` scores the reserved held-out batch and is for final reporting only — reading an arm choice out of it is what went wrong on Day 5."
     ],

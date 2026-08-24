@@ -34,7 +34,6 @@ import {
   makeReceipt,
   validateActionRequest,
 } from '../razorpay/gateway.js';
-import { ActionKind } from '../core/actions.js';
 import { simulateActionOutcome, materialiseAssumptions } from './responseModel.js';
 import { makeRng, deriveSeed } from '../core/rng.js';
 
@@ -84,6 +83,33 @@ export function createSimGateway({ getLatent, seed = 1, assumptions, now = () =>
 
     const latent = getLatent(req.eventId);
     if (!latent) throw new Error(`SIM gateway: no latent record for event ${req.eventId}`);
+
+    /**
+     * A SIM-ONLY REQUIREMENT, ENFORCED HERE RATHER THAN IN `validateActionRequest`.
+     *
+     * The response model prices recovery against the loss's own physics — how old it is, which
+     * rail it was on, what kind of loss, how much. LIVE reads none of that, so putting the check
+     * in the shared validator would make every LIVE call carry a field it ignores. The shared
+     * validator exists to stop SIM being more PERMISSIVE than LIVE; this is the opposite case,
+     * SIM needing more than LIVE, and it belongs with the mode that needs it.
+     *
+     * Explicit because the failure without it is illegible: `event.occurredAt` on `undefined`
+     * throws four frames deep in the response model, and `event.occurredAt` merely *missing*
+     * is worse — it makes the case age NaN, which propagates silently into every probability
+     * and produces a report full of plausible-looking numbers computed from nothing.
+     */
+    if (!req.event) {
+      throw new Error(
+        `SIM gateway: no event on the request for ${req.eventId}. The response model prices ` +
+        'outcomes against the loss itself, so the caller must pass the event it is acting on.'
+      );
+    }
+    if (Number.isNaN(new Date(req.event.occurredAt).getTime())) {
+      throw new Error(
+        `SIM gateway: event ${req.eventId} has an unparsable occurredAt (${req.event.occurredAt}). ` +
+        'Case age would be NaN and every probability derived from it meaningless.'
+      );
+    }
 
     const outcome = simulateActionOutcome({
       action: req.action,
@@ -164,22 +190,13 @@ export function createSimGateway({ getLatent, seed = 1, assumptions, now = () =>
   };
 }
 
-/** Which gateway method a given action kind routes to. Shared by the orchestrator. */
-export function gatewayMethodFor(actionKind) {
-  switch (actionKind) {
-    case ActionKind.RETRY_NOW:
-    case ActionKind.RETRY_SCHEDULED:
-      return 'retryCharge';
-    case ActionKind.SEND_LINK:
-    case ActionKind.SWITCH_RAIL_NUDGE:
-      return 'sendPaymentLink';
-    case ActionKind.REQUEST_REAUTH:
-      return 'requestReauth';
-    default:
-      // NO_ACTION_YET, ESCALATE_HUMAN and STOP_PERMANENT never reach a gateway. Returning
-      // null rather than throwing lets the orchestrator record them as decisions without a
-      // special case, which matters because "we deliberately did nothing" has to appear in
-      // the audit trail as a decision rather than as silence.
-      return null;
-  }
-}
+/**
+ * The action -> gateway-method mapping moved to `src/razorpay/gateway.js`.
+ *
+ * It was defined here, described as "shared by the orchestrator", and could not be shared with
+ * the orchestrator at all: `boundary.test.js` stops `src/agent/**` importing `src/sim/**`. It
+ * describes the gateway interface rather than the simulation, so it belongs with the interface.
+ * Re-exported here so any existing reader of this module still finds it, with one definition.
+ */
+export { gatewayMethodFor } from '../razorpay/gateway.js';
+

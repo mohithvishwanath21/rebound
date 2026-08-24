@@ -62,6 +62,23 @@ import { isWithinHourWindow, nextInstantOutsideWindow } from '../core/timezone.j
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
 
+/**
+ * The rolling window the per-customer contact cap is measured over.
+ *
+ * Exported, and used by `TIM_CUSTOMER_MESSAGE_CAP` below, because the orchestrator has to query the
+ * contact ledger over exactly this window and there is no safe way for it to guess. It first read a
+ * `GUARDRAILS.customerMessageWindowDays` that does not exist in config, fell back to 7, and agreed
+ * with this rule only by luck. The two numbers have to be the same number: counting over 14 days
+ * while the rule's deferral instant assumes 7 would block a customer for a fortnight and report a
+ * one-week cap while doing it.
+ *
+ * It is a constant rather than a config knob on purpose. The cap COUNT is tunable
+ * (`maxMessagesPerCustomerPer7Days`) because that is a business judgement; the window is baked into
+ * the field name every consumer reads, so making it configurable would let a config edit silently
+ * falsify the name.
+ */
+export const CUSTOMER_MESSAGE_WINDOW_DAYS = 7;
+
 export const Verdict = Object.freeze({
   ALLOW: 'ALLOW',
   DEFER: 'DEFER',
@@ -368,7 +385,9 @@ export const RULES = Object.freeze([
       if (sent < cap) return null;
       const oldest = ctx.caseState.oldestCustomerMessageInWindowAt;
       const message = `customer has had ${sent} of ${cap} permitted messages in the last 7 days`;
-      return oldest ? { message, until: new Date(new Date(oldest).getTime() + 7 * DAY_MS) } : { message };
+      return oldest
+        ? { message, until: new Date(new Date(oldest).getTime() + CUSTOMER_MESSAGE_WINDOW_DAYS * DAY_MS) }
+        : { message };
     },
   },
   {

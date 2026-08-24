@@ -1901,7 +1901,10 @@ Suite 406 pass, 0 fail, 0 todo.
 
 **Still open, small:** the belief object now carries a `timing` field (`salaryWindow`, `delayDays`,
 `isScheduled`) so the audit trail can show *why* two slots differ rather than only that they do, but
-`explainDecision` does not print it yet. That belongs with the Day 7 audit trail.
+`explainDecision` does not print it yet. That belongs with the Day 7 audit trail. *(Closed on Day 7 —
+and printing it is what exposed the train/serve skew below. The trail deliberately does not print
+`delayDays`, because that column is inert at serving; see "Landing in 0.0 days about a slot six hours
+out".)*
 
 #### A t-statistic quoted without its sample size
 
@@ -1930,3 +1933,277 @@ Note the conclusion is unchanged at either n: not separable in distribution, sep
 That is what makes this worth writing down rather than quietly fixing. The numbers agreed, so nothing
 would have broken — the failure mode is a reader losing confidence in figures that were correct all
 along, which costs more than an error a test can catch.
+
+---
+
+## [Day 7] The loop crashed on its first real run, and 417 green tests were the reason
+
+**Symptom:** `npm run orchestrate-report`, the first command in this project to actually run the whole
+loop — decide, guardrail, execute, settle, schedule, advance the clock, repeat — threw on cycle one. An
+`undefined` dereference four frames inside the simulated gateway. The full test suite had been green
+before I wrote the CLI and was still green after the crash.
+
+**First hypothesis:** a bug in the new CLI, since that was the new code. Wrong, and wrong in a way I
+should have caught faster: the CLI is a hundred lines of argument parsing and printing. It called
+`runCycle`, which is what everything else calls, and the crash was inside the gateway.
+
+**Root cause:** `executeDecision` in `src/agent/orchestrator.js` built its gateway request with
+`customer` and no `event`. The simulated gateway prices every outcome against the loss's own physics —
+whether the card is dead, whether the mandate is revoked, how old the debt is — so it was resolving
+every outcome against `undefined`.
+
+But the missing field is not the interesting part. The interesting part is why no test noticed for a
+whole day of building. `stubGateway` in `test/orchestrator.test.js` never called
+`validateActionRequest` and never read `event`. **It accepted more than production accepted.** A double
+that is more permissive than the seam it stands in for is not a double; it is a second implementation
+with a weaker contract, and the only thing it can prove is that the code agrees with itself. Nine
+orchestrator tests exercised the exact call path that crashed, and all nine passed, because the thing
+they were calling would take anything.
+
+**Fix:** three places, not one, because a single-point fix here leaves the hole open for the next field
+somebody forgets.
+
+The orchestrator now passes the event. The stub now runs `validateActionRequest` — the same function
+production runs — so the double can no longer be more forgiving than the real thing. And `simGateway`
+raises an explicit, named error when `event` is missing, instead of dereferencing into nothing four
+frames deep.
+
+While adding that guard I found a worse sibling and fixed it too. A *missing* `occurredAt` did not
+crash at all: the case age came out `NaN`, `NaN` propagated through the age-decay term, and the report
+filled with plausible-looking numbers computed from nothing. That one now raises as well. A crash costs
+me twenty minutes. A silent `NaN` costs me a figure I might have put in the pitch.
+
+**Lesson:** the value of a test double is capped by how closely it refuses things. I have written the
+"my fake was right about the rule and wrong about the wording" entry once already on Day 3, and this is
+the same failure with the polarity flipped — there the fake was too strict about a message, here it was
+too loose about a field. The general form: **a double must reject everything production rejects, or the
+tests using it are measuring a contract nobody ships.** The cheapest way to guarantee that is to have
+the double call production's own validator, which costs one line and is now what it does.
+
+---
+
+## [Day 7] The recovery rate was true, and its denominator was doing all the work
+
+**Symptom:** Not a crash. The first clean run reported ₹4,311 recovered against ₹11,20,352 at risk —
+0.4%. I typed "0.4% recovery rate" into the report, looked at it, and could not tell whether that
+number was about the policy at all.
+
+**Root cause:** it mostly is not. Of the money at risk, 77.0% was parked awaiting human approval and
+7.1% escalated, leaving 15.9% — ₹1,78,203 — that the agent was ever permitted to touch. The approval
+threshold is ₹25,000 and a handful of large invoices carry most of the book, so dividing by everything
+at risk is very nearly a measurement of *where I set that threshold*, not of how well the policy
+chases money. The same ₹4,311 is 2.4% of the autonomous slice.
+
+Both numbers are arithmetically correct and each one, alone, misleads in a different direction. The
+total-book rate makes the policy look useless when what it is really reporting is a compliance
+boundary. The autonomous-slice rate flatters the policy by hiding how much of the book needed a person.
+
+**Fix:** the report prints the three-way exposure split — awaiting human, escalated, autonomous — above
+the recovery figure, then prints the rate against *both* denominators, side by side, named. The JSON
+carries all four amounts as explicit fields (`totalPaise`, `awaitingHumanPaise`, `escalatedPaise`,
+`autonomousPaise`) so the dashboard I build on Day 10 cannot quietly pick the flattering one, plus
+`recoveryIsSimulated: true`, `hasBaseline: false` and `selfRecoveryCounterfactualIncluded: false`.
+
+That last flag is the one I would want an adversarial judge to see first. `checkSelfRecovery` exists in
+the response model — some of these customers would have paid on their own — and this command does not
+call it. So ₹4,311 has had *nothing* subtracted from it. It is not net recovery, it is not incremental
+recovery, and it is not evidence the policy beats doing nothing. It is "the loop ran, and this is what
+the receipts said." The comparison that would make it a claim about value is Day 8's job, and until
+then the flag says so in the machine-readable output rather than only in prose I could later trim.
+
+**Lesson:** **a recovery rate is only as honest as its denominator, and when two defensible
+denominators exist the choice between them is a claim, so print both.** Reporting one and calling it
+"the" recovery rate would not have been a wrong number — which is exactly what makes it the kind of
+thing that survives into a pitch deck. Also worth naming: the 77% awaiting approval is not a failure
+row. Track 03 asks for compliant escalation, and that percentage *is* the escalation working. I nearly
+wrote it up as a shortfall before noticing I was apologising for the feature.
+
+---
+
+## [Day 7] "Landing in 0.0 days" about a slot six hours out
+
+**Symptom:** I added the timing sentence to the audit trail so the decision could explain why one
+scheduled slot outscored another instead of merely asserting that it did. It printed: *"this is a
+scheduled retry landing in 0.0 days"* — about a retry scheduled for six hours later.
+
+**First hypothesis:** a formatting bug. `toFixed(1)` on a fraction of a day, hours divided by the wrong
+constant, something arithmetic. It was not: the value being printed really was exactly zero.
+
+**Root cause:** a train/serve feature skew, and the sixth day of the retry-timing story rather than a
+new bug. `src/eval/dataset.js` builds its feature vectors with `context.now` set to the *decision*
+instant. `src/agent/decide.js` — correctly, per the landing-instant principle established on Day 6 —
+scores every candidate at `guard.effectiveAt`, the instant the action *lands*. The `delayDays` column is
+computed as `scheduledFor − now`. At serving, `now == scheduledFor`, so **`delayDays` is structurally
+pinned at zero for every scheduled retry that has ever been scored in production.**
+
+I wrote a probe that builds the same case's vector both ways and diffs all 140 columns. Three differ:
+
+| column | training | serving | |
+|---|---|---|---|
+| `delayDays` | 0.25 / 3 / 9 | always 0 | skew |
+| `ageDays` | 1.0942 | 1.5228 | skew |
+| `ageDecayProxy` | 0.3348 | 0.2181 | skew |
+| `salaryWindow` | proximity of the slot | proximity of the slot | consistent |
+
+A coefficient alone does not size the damage. `node src/eval/cli/probe-coefficients.js` now prints
+weight times the training range for each of these — the log-odds the model learned to spend and the
+engine cannot:
+
+```
+delayDays      w=-0.0650  train range [0.000, 9.000]  swing -0.5854   PINNED AT 0 at serving
+ageDays        w=-0.3265  train range [0.002, 1.462]  swing -0.4765   shifts forward at serving
+ageDecayProxy  w= 0.2789  train range [0.232, 0.998]  swing  0.2137   shifts forward at serving
+salaryWindow   w= 0.3953  train range [0.000, 1.000]  swing  0.3953   consistent — the control
+```
+
+So the dead column carries the **largest** swing of the four — bigger than `ageDays`, and bigger than
+`salaryWindow`, which is the timing column the model leans on hardest. The model learned a real
+preference for shorter delays and then, at serving, was handed a constant.
+
+Two things keep this from being worse than it looks. `salaryWindow` reads `action.scheduledFor`
+regardless of `context.now`, so it is byte-identical on both sides — which also corrects something I
+had believed for a day: passing the landing instant into the scorer was *not* what made the salary
+window visible to the model. That was already right. Its only measured effects were zeroing `delayDays`
+and ageing the case forward. And the two remaining skewed columns are both age, moving in the direction
+the delay would have moved the prediction anyway, so `delayDays` may be largely redundant with them.
+May be. That is a measurement I have not made.
+
+**Fix, and the part I deliberately did not fix.** The audit line now derives its delay from
+`effectiveAt − decidedAt` — two timestamps, which cannot degenerate — and never from the feature. It
+prints "landing in 0.3 days" for the six-hour slot and "landing in 2.0 days" for a two-day slot. The
+docblock states plainly that `delayDays` is inert at serving rather than quietly substituting a
+plausible number, because the whole point of the line is to explain a probability and a fabricated
+input explains nothing.
+
+The skew itself is open, as task #51, and that is a decision rather than a backlog accident. Two
+internally coherent conventions exist: decision-time features with an explicit delay column, or
+landing-time features with the delay absorbed into age. The defect is that training uses one and
+serving the other. Picking either changes every trained model and every regret figure this repo has
+reported, and I have already had one experience this week of a timing change tripling every number in
+the project. So it goes into the Day 8 eval where its effect on recovered money can be *measured*,
+pre-registered, and not selected on the held-out split — the same discipline as the original go/no-go.
+Fixing it by eye tonight would feel productive and would produce numbers I could not defend.
+
+The regression pin is the shape worth copying. It asserts **both** that `timing.delayDays` is 0 **and**
+that the printed sentence says 2.0 days. Asserting only the sentence would pass in any world where the
+feature and the timestamps happen to agree, which is every world except the broken one.
+
+**Lesson:** two of them, and the second is the one I keep re-learning.
+
+**A feature is defined by the function that builds it *and* the arguments it is called with.** On Day 6
+I confirmed `features.js` computed the timing columns correctly and concluded the timing fix was
+complete; the engine was importing a scoring arm that could not see them. Today I confirmed the columns
+were correct again, and the *caller* was passing a different clock. Same lesson, second bill.
+
+**Printing a number is a test.** Two of the three most consequential defects in this project were found
+by rendering a value into an English sentence and noticing the sentence was false — the seven-way tie
+in identical paise on Day 6, and "landing in 0.0 days" today. Neither had a failing assertion anywhere
+near it. Prose has a property unit tests lack: it forces a value into a claim, and claims can be
+obviously wrong in a way that a float in a table cannot.
+
+---
+
+## [Day 7] I wrote the coefficient into the docs from memory, and it was wrong by a third
+
+**Symptom:** Writing up the skew above, I quoted the `delayDays` weight as −0.0490 with a −0.4286
+log-odds swing, and the `ageDays` weight as −0.4385, in both VERIFY.md and this log. Then, because
+VERIFY.md opens with the sentence "nothing here asks you to take a number on trust", I ran the repo's
+own coefficient probe before shipping the paragraph. It prints **−0.0650**, swing **−0.5854**, and
+`ageDays` **−0.3265**.
+
+**Root cause:** the figures I remembered came from a fit I had run earlier against a different
+configuration — the orchestrator path fits with `l2: 1e-4` on seed `day7`; `probe-coefficients.js` uses
+`l2: 1e-3` on seed `day5`. Neither number is wrong. They answer the same question about two different
+fits, and I had recorded one without recording which.
+
+The correction also *strengthened* the finding, which is the part I want to remember. At the
+reproducible numbers, `delayDays` carries the largest swing of the four columns involved — larger than
+`ageDays`, larger than `salaryWindow`. I had written it up as "comparable in magnitude to `ageDays`".
+Had I shipped the remembered figures, I would have understated my own defect and then been unable to
+reproduce the understatement.
+
+**Fix:** `probe-coefficients.js` gained a `TRAIN/SERVE SKEW` block that prints weight, training range
+and the product of the two for all four columns, with `salaryWindow` labelled in the output as the
+control. Both documents now quote that block and name the command above the numbers. A figure with no
+command attached is a figure I will eventually misremember.
+
+**Lesson:** this is the **third** time this exact failure has appeared in this project — the Day 5
+"different seeds were all the same seed", the Day 6 t-statistic quoted without its `--seeds=20` flag,
+and now a coefficient quoted without its `l2` and its seed. The pattern is stable enough to state as a
+rule: **a number that is not printed by a command is not a finding, it is a recollection.** The fix is
+never "be more careful"; it is to make the command print it, then quote the command. I had already
+written that lesson down on Day 6 and still did it again on Day 7, which is the honest reason it is now
+enforced by the probe rather than by my intentions.
+
+---
+
+## [Day 7] The agent retried an expired card three times, and the arithmetic was right
+
+**Symptom:** Reading the audit trail of a single case in the first clean run — `evt_000020`, ₹2,977,
+diagnosed `EXPIRED_INSTRUMENT` at REASON tier from `reason=card_expired` — I found three `RETRY_NOW`
+attempts across three cycles, at p = 0.009, 0.007, 0.006. All three failed. Nothing was recovered.
+
+The trail says it in its own words, which is worse than any summary I could write:
+
+```
+Tue Aug 25 03:  CASE_DECIDED   ACT -> RETRY_NOW (EV ₹19, p=0.009, bar ₹2, 23 candidates)
+Tue Aug 25 03:  ATTEMPT_SETTLED  FAILED
+Wed Aug 26 03:  CASE_DECIDED   ACT -> RETRY_NOW (EV ₹13, p=0.007, bar ₹2, 23 candidates)
+Wed Aug 26 03:  ATTEMPT_SETTLED  FAILED
+Wed Aug 26 15:  CASE_DECIDED   ACT -> RETRY_NOW (EV ₹12, p=0.006, bar ₹2, 23 candidates)
+Wed Aug 26 15:  ATTEMPT_SETTLED  FAILED
+```
+
+**Root cause:** the expected-value arithmetic is correct and the policy floor is too low. I nearly
+wrote this entry with hand-waved numbers — "about ₹18 gross against about ₹6 of penalty" — and then
+reconstructed the decomposition properly, which produced a much sharper finding than the one I was
+about to record. The case is `FAILED_SUBSCRIPTION`, contribution margin 0.75. At p = 0.006 on ₹2,977:
+
+```
+gross                 0.006 x 297700 x 0.75  =  1340 paise   ₹13.40
+expected decline cost (1 - 0.006) x 200      =   199 paise    ₹1.99
+                                                ----------
+EV                                              1141 paise   ₹11.41
+bar to act (minEvToActPaise)                     200 paise    ₹2.00
+```
+
+Look at the two constants. `failedRetryPenaltyPaise` is **200 paise** and `minEvToActPaise` is also
+**200 paise**. I set the price of annoying a customer with a doomed retry to exactly the same number as
+the minimum expected value required to do anything at all. So any action with more than about ₹4 of
+gross upside clears the bar no matter how hopeless it is, and a ₹2,977 invoice at a 0.6% chance has ₹13.
+The engine is doing precisely what it was told. What it was told is wrong.
+
+The trouble is that "retried a card it had itself diagnosed as expired, three times" is the first thing
+an adversarial judge will find in this trail, and no amount of correct EV decomposition makes that a
+good look. It also points at something real rather than cosmetic: `diagnosis.physics.retryCanSucceed`
+exists and the decision does not gate on it. A near-zero probability and a *structurally impossible*
+action are different states, and the engine currently treats the second as a small version of the
+first.
+
+**Fix:** none yet, deliberately — logged as task #52, blocked on the Day 8 eval. Three candidate knobs
+would each suppress this: raise `failedRetryPenaltyPaise` so a decline costs what annoying a customer
+actually costs, raise `minEvToActPaise` off the floor, or add a hard physics gate that refuses retries
+when `retryCanSucceed` is false. They are not equivalent — the first two are prices and the third is a
+prohibition — and choosing by taste is how a policy accumulates knobs that were tuned to make one trail
+read nicely. The sensitivity sweep is where that choice gets made, with `failedRetryPenaltyPaise` swept
+widest because it is the one I have the least evidence for.
+
+**Lesson:** three, and the middle one is the one I did not expect to find.
+
+**A stopping rule whose floor equals its own penalty is not a stopping rule.** ₹2 to act and ₹2 to fail
+means the two constants cancel and the policy reduces to "act if gross upside exceeds roughly twice the
+penalty" — which on a mid-sized invoice is satisfied at well under a 1% success chance. Two numbers that
+happen to be equal because I picked both by feel on Day 6, and their equality is doing more work than
+either of them individually.
+
+**Reconstructing the arithmetic beat asserting it, again.** I had "about ₹18 against about ₹6" in the
+draft and it was plausible enough that I nearly shipped it. The real decomposition is ₹13.40 against
+₹1.99 with a 0.75 margin, and it exposed the equal-constants coincidence that the wrong numbers hid.
+That is the second time in one entry-writing session that computing something I could have estimated
+turned a vague observation into a specific defect.
+
+**The case worth reading in any batch output is not the aggregate, it is the single trail an opponent
+would quote.** I found this by printing one case's full lifecycle into the report and reading it as a
+story, which is the same technique that found the two defects above. Aggregates hide the embarrassing
+case; that is what aggregates are for.
+

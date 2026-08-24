@@ -147,6 +147,47 @@ export function runStoreContract(label, makeStore) {
       /idempotencyKey/);
   });
 
+  T('a pending attempt is distinguishable from a settled one, which is the whole control', async () => {
+    /**
+     * `putAction` returning false means "this key has been seen before". It does NOT mean the
+     * gateway call that followed it ever completed, and treating those as the same thing is how
+     * a restart either charges someone twice or abandons an attempt whose money already moved.
+     *
+     * So the attempt is written PENDING *before* the side effect and settled *after* it. A
+     * restart reads the attempt back: SETTLED means skip, PENDING means we died in flight and
+     * must reconcile against the provider rather than guess. This test pins that the store can
+     * represent the difference at all — the orchestrator's handling of it is pinned separately
+     * in test/orchestrator.test.js.
+     */
+    const s = await makeStore();
+    const key = 'rebound:e1:RETRY_NOW:0';
+
+    assert.equal(await s.putAction({
+      runId: 'r1', eventId: 'e1', kind: 'RETRY_NOW', idempotencyKey: key, state: 'PENDING',
+    }), true);
+
+    // Mid-flight: the key exists, the outcome does not.
+    assert.equal((await s.getAction(key)).state, 'PENDING');
+    assert.deepEqual((await s.getPendingActions('r1')).map((a) => a.idempotencyKey), [key]);
+    assert.equal(await s.getAction('never-written'), null);
+
+    await s.patchAction(key, {
+      state: 'SETTLED',
+      'receipt.state': 'CAPTURED',
+      'receipt.amountCollectedPaise': 100000,
+    });
+
+    const settled = await s.getAction(key);
+    assert.equal(settled.state, 'SETTLED');
+    assert.equal(settled.receipt.amountCollectedPaise, 100000);
+    assert.equal(settled.eventId, 'e1', 'settling must not disturb the rest of the attempt');
+    assert.deepEqual(await s.getPendingActions('r1'), [], 'a settled attempt is no longer pending');
+
+    // Settling something that was never written is a bug, not a no-op — the same reasoning as
+    // patchCase on an unknown case.
+    await assert.rejects(() => s.patchAction('ghost-key', { state: 'SETTLED' }));
+  });
+
   T('contact ledger counts within the window and excludes what falls outside', async () => {
     const s = await makeStore();
     const day = 24 * 60 * 60 * 1000;
@@ -168,6 +209,38 @@ export function runStoreContract(label, makeStore) {
     const exact = new Date(now - 5 * day);
     assert.equal(await s.countContactsSince('c1', exact), 2,
       'a contact exactly on the boundary is counted, so the cap never rounds in favour of sending');
+  });
+
+  T('the ledger can say when the contact window clears, not just that it is full', async () => {
+    /**
+     * `TIM_CUSTOMER_MESSAGE_CAP` returns DEFER with an instant when it knows the oldest message in
+     * the window, and degrades to FORBID when it does not. FORBID is the safe degradation, but it
+     * drops a capped customer with no wakeup time — so the difference between the two is a case
+     * that resumes the moment it legally can versus one that sits until something else moves it.
+     *
+     * In the contract rather than in the memory-store tests because a `mongoStore` that omits this
+     * method would not fail loudly: the cap would keep working, keep being safe, and quietly stop
+     * scheduling anybody. That is the kind of regression only a shared contract catches.
+     */
+    const s = await makeStore();
+    const day = 24 * 60 * 60 * 1000;
+    const now = new Date('2026-08-22T10:00:00Z');
+
+    const oldestInside = new Date(now - 5 * day);
+    await s.recordContact({ customerId: 'c1', channel: 'SMS', sentAt: new Date(now - 1 * day) });
+    await s.recordContact({ customerId: 'c1', channel: 'EMAIL', sentAt: oldestInside });
+    await s.recordContact({ customerId: 'c1', channel: 'SMS', sentAt: new Date(now - 9 * day) });
+
+    const since7 = new Date(now - 7 * day);
+    assert.equal(
+      await s.oldestContactSince('c1', since7),
+      oldestInside.toISOString(),
+      'the oldest contact INSIDE the window is what the window clears on; the 9-day-old one has already expired'
+    );
+
+    // A customer with nothing in the window is not "capped since the beginning of time" — the
+    // absence has to be reported as absence, or the caller computes a deferral from a null date.
+    assert.equal(await s.oldestContactSince('c_none', since7), null);
   });
 
   T('audit is append-only and ordered', async () => {

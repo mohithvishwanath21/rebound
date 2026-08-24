@@ -261,6 +261,41 @@ export function validateActionRequest(req) {
   return true;
 }
 
+/**
+ * Which gateway method a given action kind routes to.
+ *
+ * WHY THIS LIVES HERE AND NOT IN simGateway.js, WHERE IT WAS FIRST WRITTEN.
+ *
+ * It started in `src/sim/simGateway.js` with the comment "shared by the orchestrator", which
+ * turned out to be a promise that file could not keep: `test/boundary.test.js` forbids anything
+ * under `src/agent/**` from importing `src/sim/**`, so the orchestrator could not reach it. The
+ * options were to duplicate the switch on the agent side or to move it, and duplicating a routing
+ * table is how SWITCH_RAIL_NUDGE eventually gets added to one copy and not the other — a silent
+ * "no gateway method, so do nothing" for an action the policy believed it had taken.
+ *
+ * Moving it is also the more honest placement. This mapping describes the *gateway interface* —
+ * both implementations expose exactly these three methods — and has nothing to do with simulating
+ * a response. `simGateway.js` re-exports it so there is one definition and no drift.
+ *
+ * Returns null for NO_ACTION_YET, ESCALATE_HUMAN and STOP_PERMANENT rather than throwing, because
+ * those are real outcomes that must appear in the audit trail as decisions rather than as silence.
+ * The orchestrator distinguishes "routes nowhere" from "unroutable" by asking this first.
+ */
+export function gatewayMethodFor(actionKind) {
+  switch (actionKind) {
+    case ActionKind.RETRY_NOW:
+    case ActionKind.RETRY_SCHEDULED:
+      return 'retryCharge';
+    case ActionKind.SEND_LINK:
+    case ActionKind.SWITCH_RAIL_NUDGE:
+      return 'sendPaymentLink';
+    case ActionKind.REQUEST_REAUTH:
+      return 'requestReauth';
+    default:
+      return null;
+  }
+}
+
 /** Channels Razorpay's payment-link API can actually notify over. */
 export const RAZORPAY_NOTIFIABLE = new Set(['EMAIL', 'SMS']);
 

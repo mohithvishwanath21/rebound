@@ -14,12 +14,17 @@ Requires Node 22 or newer (`node --version`).
 
     npm run check
 
-Runs the test suite, the simulator self-check, the diagnosis report, the model report and the batch
-decision report in sequence. Under a minute — 23 s on the machine it was last measured on, and it was
-~40 s on the reference Windows box before the decision report was added, so expect that range. If this
-passes, everything below passes.
+Runs the test suite, the simulator self-check, the diagnosis report, the model report, the batch
+decision report and the orchestrated multi-cycle run in sequence. Under a minute — 23 s on the machine
+it was last measured on, and it was ~40 s on the reference Windows box before the decision report was
+added, so expect that range. If this passes, everything below passes.
 
-Verify the five commands it runs, rather than trusting the label:
+The last two look similar and are not. `decide-report` prices a batch and stops — nothing is executed,
+so its money column is what the policy *expects*. `orchestrate-report` runs the loop against the
+gateway across eight cycles and reports only what a receipt confirmed. Expected money and collected
+money are different claims and this repo never prints one under the other's name.
+
+Verify the six commands it runs, rather than trusting the label:
 
     npm pkg get scripts.check
 
@@ -29,7 +34,7 @@ Verify the five commands it runs, rather than trusting the label:
 
     npm test
 
-Expect `# pass 406`, `# fail 0`, `# todo 0`. Roughly 7 seconds. Section 8 explains why the count moved
+Expect `# pass 420`, `# fail 0`, `# todo 0`. Roughly 7 seconds. Section 8 explains why the count moved
 and why there are no longer any `todo` entries.
 
 The tests are in three deliberately separate categories, and the distinction matters more than the
@@ -52,11 +57,20 @@ Run one file at a time if you want to read the names:
     node --test test/expectedValue.test.js
     node --test test/decide.test.js
     node --test test/retryTiming.test.js
+    node --test test/orchestrator.test.js
 
 The Day 6 files are worth reading for the names alone. Several are regression pins whose titles state
 the bug: "the approval queue and the escalation queue are separate, and their totals reconcile", "a
 revoked mandate is refused, not priced", "an unprofitable deferred action does not buy a WAIT — and the
 stop still knows its evidence".
+
+Two Day 7 pins are worth singling out, because both exist to stop a *silent* failure rather than a
+loud one. "the trail states the scheduled delay from the timestamps, not from the inert delayDays
+feature" asserts a feature is zero *and* that the printed sentence is not, since checking only the
+sentence would pass whenever the two happen to agree. And the stub gateway in
+`test/orchestrator.test.js` now runs the same `validateActionRequest` production runs — it previously
+accepted more than production accepted, which is how a crash-on-first-run defect survived 417 green
+tests. Section 9 has that story.
 
 ---
 
@@ -374,7 +388,7 @@ claimed; the first block is what the code did.
 
 The three `todo` tests in `test/retryTiming.test.js` are now live assertions, joined by two more the
 fix itself demanded, and four in `test/recoveryModel.test.js` covering the second half of the fix.
-**Expect 406 tests, 406 pass, 0 fail, 0 todo.**
+Day 7 added fourteen more, so the current total is **420 tests, 420 pass, 0 fail, 0 todo.**
 
     node --test test/retryTiming.test.js
 
@@ -398,7 +412,134 @@ predictions and how they scored — one of them on a **falsified premise** — i
 
 ---
 
-## 9. Diagnosis accuracy
+## 9. The whole loop, executed rather than priced — Day 7
+
+    npm run orchestrate-report
+
+Section 7 prints what the policy *expects* to recover. That is arithmetic over the policy's own
+estimates: nothing is executed, no outcome is drawn, and a large number there is a claim rather than a
+result. This command runs the loop — decide, guardrail, execute against the gateway, persist, settle
+receipts, schedule wakeups, advance the clock, repeat — and prints only what a receipt actually said
+was `CAPTURED`. About seven seconds, no database, no network, no API key.
+
+With the defaults (`seed=day7`, 80 cases, 8 cycles 12 hours apart from 2026-08-24T09:30:00Z):
+
+| | |
+|---|---|
+| total at risk | ₹11,20,352 |
+| **recovered (SIMULATED)** | **₹4,311** |
+| attempts that returned a receipt | 73 |
+| ledger check | receipts and case records agree |
+| worst per-customer message count | 2, against a cap of 2 — no breach |
+
+**Read the exposure split before reading the recovery rate.** Of the money at risk, 77.0% is parked
+awaiting human approval and 7.1% is escalated, leaving 15.9% (₹1,78,203) the agent was actually
+permitted to act on. So the same ₹4,311 is *2.4% of what it was allowed to chase* and *0.4% of
+everything at risk*. The report prints both, because either alone misleads: divide by everything and
+you are measuring the ₹25,000 approval threshold rather than the policy, since a handful of large
+invoices park most of the exposure with a person; divide only by the autonomous slice and you hide how
+much of the book needed one. The approval and escalation rows are not failures — they are the
+compliant-escalation half of what Track 03 asks for.
+
+**Neither rate says the policy beats anything.** There is no baseline and no counterfactual here.
+`checkSelfRecovery` exists in the response model and this command does not call it, so the money that
+would have come back with no agent at all has not been subtracted from anything. The only honest
+reading is "the loop runs, and this is what it did" — not "this is what it was worth". That comparison
+is Day 8.
+
+Three things in the output are deliberately measured rather than asserted:
+
+- **The ledger check.** Two independent code paths produce the recovered figure — the per-cycle
+  receipts, and the patch `settleAttempt` writes onto the case record. They are reconciled and the
+  result printed. A disagreement would mean money credited with no receipt behind it.
+- **Compliance is counted from the action ledger, by customer** — not from the guardrail's own
+  verdicts. Asking a rule whether it was obeyed is circular; counting what was actually sent is not.
+- **The timing line** in the audit trail reads its delay from `effectiveAt - decidedAt`, never from the
+  `delayDays` feature. See below.
+
+Determinism, which is the claim most worth attacking on a command that draws random outcomes:
+
+    node src/eval/cli/orchestrate-report.js --seed=day7 --count=30 --cycles=5 --json > a.json
+    node src/eval/cli/orchestrate-report.js --seed=day7 --count=30 --cycles=5 --json > b.json
+    fc.exe a.json b.json
+
+Identical apart from `elapsedMs`. The JSON also names its denominators explicitly
+(`exposure.totalPaise`, `awaitingHumanPaise`, `escalatedPaise`, `autonomousPaise`) and carries
+`recoveryIsSimulated: true`, `hasBaseline: false`, `selfRecoveryCounterfactualIncluded: false`, so a
+dashboard cannot quietly pick the flattering denominator or drop the caveat.
+
+Bad flags fail loudly rather than being ignored:
+
+    node src/eval/cli/orchestrate-report.js --split=MIDDLE
+    node src/eval/cli/orchestrate-report.js --seed day7
+
+Both exit non-zero with an explanation. The second matters because an earlier version of this CLI
+silently ignored the spaced form and then printed a report labelled with a seed it had not used.
+
+### The defect this command found, and why 417 passing tests had missed it
+
+Running the loop for real crashed immediately: `executeDecision` built its gateway request with
+`customer` but no `event`, and the simulated gateway prices outcomes against the loss's own physics, so
+it was resolving every outcome against `undefined`.
+
+The reason the suite missed it is the part worth keeping. `stubGateway` in `test/orchestrator.test.js`
+never called `validateActionRequest` and never read `event` — **it accepted more than the real seam
+accepts.** A double that is more permissive than production is not a double; it is a second
+implementation with a weaker contract, and the only thing it can prove is that the code agrees with
+itself. Fixed in three places rather than one: the orchestrator now passes the event, the double now
+validates exactly as production does, and `simGateway` raises an explicit error for a missing event or
+an unparsable `occurredAt` — because the failure without it was an `undefined` dereference four frames
+deep, and a *missing* `occurredAt` was worse still, silently making the case age `NaN` and filling the
+report with plausible numbers computed from nothing.
+
+### An open train/serve skew, printed rather than hidden
+
+While making the audit trail explain its timing, the line read *"landing in 0.0 days"* about a slot six
+hours out. A probe that builds the feature vector both ways found **3 of 140 columns differ** between
+the dataset and the engine:
+
+| column | in training | at serving | |
+|---|---|---|---|
+| `delayDays` | 0.25 / 3 / 9 | **always 0** | skew |
+| `ageDays` | age at decision (1.0942) | age at landing (1.5228) | skew |
+| `ageDecayProxy` | 0.3348 | 0.2181 | skew |
+| `salaryWindow` | proximity of the slot | proximity of the slot | consistent |
+
+`dataset.js` builds features at the decision instant; `decide.js` scores at the landing instant, where
+`delayDays` is `scheduledFor - scheduledFor` and therefore structurally zero for every scheduled retry.
+How much the model wanted to say with that column is a measurement, not a guess:
+
+    node src/eval/cli/probe-coefficients.js
+
+Read the `TRAIN/SERVE SKEW` block. Weight alone means little; the figure that matters is weight times
+the range the column spans in training — the log-odds the model learned to spend and the shipped engine
+cannot. `delayDays` carries a **−0.5854 swing that never fires in production**, which is *larger* than
+`ageDays` (−0.4765) and larger than `salaryWindow` (0.3953), the column the model weighs most heavily.
+
+Note which column is *not* affected, and it is the control in that block: `salaryWindow` reads
+`action.scheduledFor` directly in both paths. So passing the landing instant into the scorer was not
+what made the salary window visible; that was already correct. Its only measured effects were zeroing
+`delayDays` and ageing the case forward.
+
+This is **not fixed yet, deliberately.** Two internally coherent conventions exist — decision-time
+features with an explicit delay column, or landing-time features with the delay absorbed into age — and
+the defect is that training uses one while serving uses the other. Choosing between them changes every
+trained model and every Day 5 figure, so it belongs in the eval where its effect on recovered money can
+be measured instead of asserted. Meanwhile the audit trail sidesteps it by reading the delay from the
+timestamps, and `test/decide.test.js` pins that: it asserts *both* that the feature is zero *and* that
+the printed delay is not, because asserting only the printed text would pass whenever the two agree.
+
+    node --test test/decide.test.js
+
+**Expect 38 tests, 38 pass.** The three worth reading are the timing-line tests at the end. One of
+them covers a case that is easy to get wrong: when the scoring arm is a `GROUP BY`, which structurally
+cannot see when a slot lands, the trail has to *say so* rather than printing nothing — an absent timing
+line and a timing line showing the slot did not matter look identical to a reader, and they are
+opposite claims.
+
+---
+
+## 10. Diagnosis accuracy
 
     npm run diagnose-report
 
@@ -409,7 +550,7 @@ a rule table that never says "I don't know" looks identical to one that is alway
 
 ---
 
-## 10. The simulator's assumptions, stated
+## 11. The simulator's assumptions, stated
 
     npm run describe-sim
     npm run verify-sim
@@ -420,7 +561,7 @@ measurements, and the honest version of this project prints them rather than bur
 
 ---
 
-## 11. What is proven versus what is measured
+## 12. What is proven versus what is measured
 
 Two claims, never mixed, and the difference is the whole argument:
 
@@ -438,7 +579,7 @@ No command in this repo produces a number that mixes the two.
 
 ---
 
-## 12. Git history
+## 13. Git history
 
     git log --oneline
     git show --stat HEAD

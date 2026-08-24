@@ -75,7 +75,18 @@ import { assertPaise } from '../core/money.js';
  * @property {(action: object) => Promise<boolean>} putAction resolves false if the
  *           idempotency key was already present, which is how a crash-restart is stopped
  *           from charging a customer twice
+ * @property {(idempotencyKey: string) => Promise<object|null>} getAction the other half of
+ *           that control. `putAction` returning false says "this key has been seen"; it does
+ *           NOT say the gateway call finished. Reading the attempt back is what lets the
+ *           orchestrator tell a completed attempt from one that died in flight, and those
+ *           two need opposite handling: skip the first, reconcile the second.
+ * @property {(idempotencyKey: string, patch: object) => Promise<void>} patchAction settle an
+ *           attempt with its receipt. Attempts are the one record that is written before the
+ *           fact and completed after it, because the whole point is to have persisted the key
+ *           BEFORE the side effect it guards.
  * @property {(runId: string) => Promise<object[]>} getActions
+ * @property {(runId: string) => Promise<object[]>} getPendingActions attempts written but
+ *           never settled — the crash-recovery work list
  * @property {(entry: object) => Promise<void>} appendAudit
  * @property {(runId: string, filter?: {eventId?: string, type?: string}) => Promise<object[]>} getAudit
  *
@@ -84,6 +95,13 @@ import { assertPaise } from '../core/money.js';
  * matter, which is why it is a named method with an explicit window.
  * @property {(entry: object) => Promise<void>} recordContact
  * @property {(customerId: string, since: Date) => Promise<number>} countContactsSince
+ * @property {(customerId: string, since: Date) => Promise<string|null>} oldestContactSince
+ *
+ * `oldestContactSince` exists so that a capped customer produces a DEFER with a real instant
+ * rather than a FORBID. `TIM_CUSTOMER_MESSAGE_CAP` degrades to FORBID when it cannot say WHEN the
+ * window clears — correct, but it means a customer who hit the cap is dropped for the rest of the
+ * cycle with no scheduled wakeup. Knowing the oldest message in the window turns that into
+ * "unreachable until exactly this instant", which the scheduler can act on.
  *
  * Scheduling
  * @property {(runId: string, dueBy: Date) => Promise<object[]>} getDueCases
@@ -256,6 +274,38 @@ export function createMemoryStore() {
       return actions.filter((a) => a.runId === runId).map(clone);
     },
 
+    /**
+     * Read one attempt back by its key.
+     *
+     * Exists because `putAction` returning false is genuinely ambiguous about the thing that
+     * matters most. The key being present proves we got as far as writing it; it says nothing
+     * about whether the gateway call that followed ever completed. A restart that treats those
+     * two situations the same either re-charges a customer or silently abandons an attempt
+     * whose money may already have moved.
+     */
+    async getAction(idempotencyKey) {
+      return clone(actions.find((a) => a.idempotencyKey === idempotencyKey)) ?? null;
+    },
+
+    /**
+     * Settle an attempt. Deliberately keyed on the idempotency key rather than on position,
+     * because the key is the only identifier that survives a process restart.
+     */
+    async patchAction(idempotencyKey, patch) {
+      const a = actions.find((x) => x.idempotencyKey === idempotencyKey);
+      if (!a) throw new Error(`patchAction: unknown action ${idempotencyKey}`);
+      applyPatch(a, patch);
+    },
+
+    /**
+     * Attempts written but never settled. On a clean run this is empty at the end, and a
+     * non-empty list is the honest signal that something died mid-flight rather than an
+     * absence nobody notices.
+     */
+    async getPendingActions(runId) {
+      return actions.filter((a) => a.runId === runId && a.state === 'PENDING').map(clone);
+    },
+
     async appendAudit(entry) {
       // Append-only by construction: there is deliberately no update or delete method.
       audit.push(clone({ ...entry, seq: audit.length }));
@@ -277,6 +327,14 @@ export function createMemoryStore() {
       return contacts.filter(
         (c) => c.customerId === customerId && new Date(c.sentAt).getTime() >= t
       ).length;
+    },
+    async oldestContactSince(customerId, since) {
+      const t = since.getTime();
+      const within = contacts
+        .filter((c) => c.customerId === customerId && new Date(c.sentAt).getTime() >= t)
+        .map((c) => new Date(c.sentAt).getTime());
+      if (within.length === 0) return null;
+      return new Date(Math.min(...within)).toISOString();
     },
 
     /** Test and debug affordance; not part of the interface the agent uses. */

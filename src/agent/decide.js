@@ -144,13 +144,34 @@ export function decideForCase({
   const scored = [];
 
   for (const raw of list) {
-    // Money movement carries its key from the moment it becomes a candidate, so
-    // ABS_IDEMPOTENCY_KEY is checking a real property rather than one this function forgot to
-    // set. An action that reaches the guardrails without a key is a construction bug, and the
-    // rule is there to catch it rather than to be satisfied by it.
-    const action = MONEY_MOVING.has(raw.kind)
-      ? { ...raw, idempotencyKey: mintIdempotencyKey({ eventId: observed.eventId, action: raw, attemptOrdinal: caseState.retriesUsed }) }
-      : raw;
+    /**
+     * Every action with an irreversible outbound side effect carries its key from the moment it
+     * becomes a candidate, so ABS_IDEMPOTENCY_KEY is checking a real property rather than one this
+     * function forgot to set. An action that reaches the guardrails without a key is a
+     * construction bug, and the rule is there to catch it rather than to be satisfied by it.
+     *
+     * CONTACTING ACTIONS GET A KEY TOO, AND THEY DID NOT UNTIL DAY 7.
+     *
+     * Originally only MONEY_MOVING was keyed, on the reasoning that a duplicate charge is the
+     * expensive mistake. That reasoning was incomplete. Day 7's orchestrator persists an attempt
+     * before performing it and reads it back on restart, and it can only do that for an action
+     * that has a stable identity — so an unkeyed SEND_LINK was an action that could not be made
+     * crash-safe *even in principle*. The failure mode is a customer receiving the same payment
+     * link twice because the process died between sending it and recording that it was sent, which
+     * is a consent problem rather than an accounting one and therefore does not show up in any
+     * money total. It also silently double-spends the contact budget the messaging cap exists to
+     * protect.
+     *
+     * The ordinal differs by action type because the counters do: money movement is keyed on
+     * `retriesUsed`, contact on `touchesUsed`. Using one counter for both would make the second
+     * legitimate message collide with the first retry's key and be deduplicated into silence.
+     */
+    let action = raw;
+    if (MONEY_MOVING.has(raw.kind)) {
+      action = { ...raw, idempotencyKey: mintIdempotencyKey({ eventId: observed.eventId, action: raw, attemptOrdinal: caseState.retriesUsed }) };
+    } else if (CUSTOMER_CONTACTING.has(raw.kind)) {
+      action = { ...raw, idempotencyKey: mintIdempotencyKey({ eventId: observed.eventId, action: raw, attemptOrdinal: caseState.touchesUsed }) };
+    }
 
     const guard = checkGuardrails({ action, caseState, diagnosis, runState, now: decidedAt, config });
 
@@ -219,6 +240,15 @@ export function decideForCase({
       p,
       support: classifySupport(belief),
       effectiveAt: at,
+      /**
+       * The three feature columns that express retry timing, carried out of the belief so the
+       * audit trail can show WHY two scheduled slots were priced differently instead of merely
+       * asserting that they were. `null` when the scoring arm is a GROUP BY, which cannot see the
+       * slot at all — and that null is itself worth printing, because a trail that silently omits
+       * the timing line for a row-based arm looks identical to one where the timing happened not
+       * to matter. Those are very different claims.
+       */
+      timing: belief?.timing ?? null,
       deferUntil: guard.deferUntil,
       violations: guard.violations,
       evaluated: guard.evaluated,
@@ -350,6 +380,7 @@ export function decideForCase({
           components: chosen.components,
           p: chosen.p,
           support: chosen.support,
+          timing: chosen.timing ?? null,
           effectiveAt: chosen.effectiveAt?.toISOString?.() ?? null,
           idempotencyKey: chosen.action.idempotencyKey ?? null,
         }
@@ -387,6 +418,7 @@ export function decideForCase({
       totalCostPaise: c.totalCostPaise ?? null,
       p: c.p,
       support: c.support?.state ?? null,
+      timing: c.timing ?? null,
       deferUntil: c.deferUntil ? new Date(c.deferUntil).toISOString() : null,
       chosen: c === chosen,
       rejectedBecause: c.rejectedBecause ?? null,
@@ -510,6 +542,56 @@ export function explainDecision(rec) {
     if (k.expectedFailurePenaltyPaise) parts.push(`${cost(k.expectedFailurePenaltyPaise)} expected decline penalty`);
     if (k.patiencePenaltyPaise) parts.push(`${cost(k.patiencePenaltyPaise)} of customer patience (touch ${k.touchesUsed + 1})`);
     if (parts.length > 0) L.push(`Cost breakdown: ${parts.join(', ')}.`);
+
+    /**
+     * WHY THE PROBABILITY WAS WHAT IT WAS, for the one distinction the model rates highest.
+     *
+     * `p` is a single number, and on a scheduled retry two different slots produce two different
+     * `p`s from the SAME cause and action kind. Without this line the trail shows that gap and
+     * never explains it, which is precisely the failure that let a tie between two slots go
+     * unnoticed for a day.
+     *
+     * THE DELAY IS READ FROM THE TIMESTAMPS, NOT FROM THE `delayDays` FEATURE. That feature is
+     * `scheduledFor - now`, and `decide.js` scores every action at the instant it LANDS, so at
+     * serving `now == scheduledFor` and the feature is pinned at 0 for every scheduled retry — it
+     * carries no information the decision could have used. Printing it would say "landing in 0.0
+     * days" about a slot three days out, which is false. `effectiveAt - decidedAt` is the real
+     * delay and is always correct. (`delayDays` being inert at serving is a known train/serve skew,
+     * logged for the Day 8 eval to measure and, if it matters, retrain against — it is not this
+     * line's job to hide it behind a plausible-looking number.)
+     *
+     * `salaryWindow` IS trustworthy here: it reads `action.scheduledFor` directly in both the
+     * training features and the serving features, so it is identical on both sides. It is the
+     * column the model weighs most heavily and the one that actually separates two slots.
+     *
+     * `timing` is null when the scoring arm is a GROUP BY, which structurally cannot see the slot.
+     * That case says so rather than staying silent, because an absent timing line and a timing
+     * line that happened not to move `p` look identical otherwise, and they are opposite claims.
+     */
+    const t = c.timing;
+    const win = (w) => (Number.isFinite(w) ? w.toFixed(2) : '0.00');
+    if (t && Number.isFinite(t.isScheduled)) {
+      if (t.isScheduled >= 1) {
+        const landsAt = rec.chosen?.effectiveAt ? new Date(rec.chosen.effectiveAt).getTime() : NaN;
+        const decidedAtMs = rec.decidedAt ? new Date(rec.decidedAt).getTime() : NaN;
+        const delayDays = Number.isFinite(landsAt) && Number.isFinite(decidedAtMs)
+          ? Math.max(0, (landsAt - decidedAtMs) / 86_400_000)
+          : null;
+        const when = delayDays === null ? 'at a future slot' : `in ${delayDays.toFixed(1)} days`;
+        L.push(
+          `Timing: this is a scheduled retry landing ${when}; its probability is priced at that future slot, not now. ` +
+            `Salary-window proximity of the slot is ${win(t.salaryWindow)} (1.0 = on payday, 0 = furthest from it) — the single input the recovery model weighs most heavily, which is why two slots for the same case score differently.`
+        );
+      } else {
+        L.push(
+          `Timing: this fires now, not on a schedule. Salary-window proximity at this instant is ${win(t.salaryWindow)} (1.0 = on payday, 0 = furthest from it).`
+        );
+      }
+    } else if (t === null && c.action?.kind === 'RETRY_SCHEDULED') {
+      L.push(
+        'Timing: the scoring arm is a lookup by cause and action, which cannot see when the slot lands, so no timing evidence backs this probability. A feature-based arm would surface it here.'
+      );
+    }
 
     // Only meaningful when the choice WAS an argmax. For a standing-based choice the runner-up
     // is better on EV by construction, and "lost by minus ₹60" is a sentence that explains
