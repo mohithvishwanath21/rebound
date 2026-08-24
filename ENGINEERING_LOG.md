@@ -1621,3 +1621,220 @@ looking at the numbers and asking why they are that shape.
 
 ---
 
+## Day 6, addendum: the timing fix, and what it revealed about every regret number I had reported
+
+The previous entry ended with a pinned defect and three `todo` tests: `recoveryProbability` never read
+`action.scheduledFor`, so every candidate was priced at the instant it was *decided* rather than the
+instant it would *land*. This entry is what happened when I fixed it. The fix itself is nine lines.
+The consequence is that the headline number this project had been reporting for two days was measured
+on a problem roughly three times easier than the real one.
+
+### The fix, and the part of it I nearly got wrong
+
+The obvious change is to derive `effectiveAt = action.scheduledFor ?? now` and use it for the
+funds-timing branch, so a retry scheduled to land after a salary credit stops being charged
+`preFundsPenalty` for the crime of arriving before one. That much I had planned.
+
+What I had not planned was age decay. Moving only the funds branch makes waiting **free**: the
+salary-window boost appears once you wait long enough, and nothing charges you for the waiting. A
+policy optimising against that ground truth learns to schedule as late as the guardrails permit,
+which is not a recovery strategy, it is a stalling strategy that happens to score well. Age decay had
+to move to the landing instant too, and with both moved the optimum is interior — for a credit two
+days out, +3d beats both +6h and +9d. That is the shape a timing decision has to have for choosing a
+slot to be a decision at all rather than a monotone preference for "later".
+
+I only noticed because I wrote the test `waiting longer is not free, so the optimum is interior rather
+than "wait forever"`, and I only wrote it because the three pre-registered `todo` tests were about the
+*presence* of a timing effect and I asked what they did not cover. The pins caught the defect; they
+did not specify the fix. Those are different jobs and I had been treating them as one.
+
+Downtime moved to the landing instant as well, on the same principle: scheduling past a known outage
+is a legitimate thing for a policy to do, and it was previously impossible to express.
+
+One deliberate asymmetry. A `scheduledFor` in the past is clamped to `now`, because a stale action
+arriving late is normal operations. A `scheduledFor` that does not parse **throws**, because `NaN`
+propagates silently through every multiplication, `clamp01(NaN)` returns `NaN`, and the case would
+then carry a probability against which every comparison is false — neither high nor low, just quietly
+excluded from every decision. Silence is the worst available outcome, so it is the one behaviour
+explicitly forbidden.
+
+### The consistency argument, which is why this counts as a fix rather than a change
+
+Two other layers already agreed with the corrected version. `src/agent/guardrails.js` evaluates
+TIMING rules at the execution instant. `src/ml/features.js` computes `salaryWindow`, `delayDays` and
+`isScheduled` from `action.scheduledFor`, with a comment saying the proxy is "applied to the time the
+money would actually be taken, which for a scheduled retry is the future slot and not now."
+
+So the feature builder and the guardrails were right, and the ground truth was the one layer that
+disagreed. That is the worst layer to be wrong in, because everything else is measured against it: the
+features were correctly describing a property of the world that the labels had been instructed not to
+have.
+
+**And here I drew the wrong conclusion, which is worth leaving in rather than editing out.** I recorded
+that this voided the expensive half of the planned fix — that the model already had timing features, so
+only the simulator needed changing. That is true of the `logistic` and `gbm` arms and false of the
+thing that actually ships. `src/eval/cli/decide-report.js:164` builds its scorer as
+`createRecoveryScorer({ model: lookup, ... modelName: 'lookup+platt' })`: the decision engine reads a
+`(diagnosedCause, actionKind)` GROUP BY, and `features.js` never enters the path. Two slots sharing a
+kind share a cell by construction, so no feature work in `features.js` can help it.
+
+The audit trail says so plainly, and it is the same audit trail that found the original defect. After
+the fix, case `evt_000001` still ranks seven `RETRY_SCHEDULED` candidates at exactly ₹31 each, still
+resolved by the alphabetical tiebreak. The ground truth now separates those slots by up to 25x and the
+agent still cannot see any difference between them.
+
+That is precisely the failure the previous entry predicted in writing — "fixing only the loud half
+would leave the engine still choosing timing by tiebreak against a ground truth that had started
+caring about it, which is worse than today, since the loss would then be real money rather than a
+wash." I wrote that warning, then read `features.js`, concluded the second half was unnecessary, and
+walked into it anyway. The reason is instructive: I checked whether the *features* existed instead of
+checking what the *engine* imported, and "the feature exists" and "the model that ships can use it"
+are different claims. So part of the tripled regret below is not the problem getting harder — it is
+the agent being newly, measurably wrong.
+
+This is now the top open item. It is also why the tripling is not a reason to revert: the honest
+sequence is a ground truth that models the decision, then an agent that can see it.
+
+### The pre-registration, and how it scored
+
+Before running anything I wrote down four predictions with a kill condition, specifically because the
+log already records me forming a convenient mechanism-backed hypothesis immediately after a Day 5
+defect and being wrong. The kill condition was: if |t| stays below the pre-declared 2.0, report "still
+not separable" and do **not** add worlds until it crosses.
+
+| # | prediction | outcome |
+|---|---|---|
+| 1 | lookup's regret worsens | Confirmed but uninformative as written — 3.85% -> 12.42%, and *every* arm roughly tripled, so it says nothing about lookup specifically |
+| 2 | logistic − lookup goes below −0.32% with \|t\| > 2.0 | **Split.** In distribution −0.42%, t = −1.36: still not separable. Under shift −1.51%, t = −2.46: separable. My prediction never said which set, which is a defect in the pre-registration, not a win |
+| 3 | the `salaryWindow` coefficient moves away from ~0 | **Premise falsified.** It was 0.2375 before the fix, not ~0. It did rise to 0.3953 (+66%) |
+| 4 | Brier moves much less than regret | Confirmed far more strongly than intended — see below |
+
+Prediction 3 is the one worth dwelling on, because I was wrong about the mechanism and being wrong
+sharpened it. I had reasoned that if the label cannot vary with a feature, the fitted weight should be
+approximately zero. But `salaryWindowProximity` was never inert: it varies **between cases**, because
+different failures occur at different points in the month, and the true probability did depend on
+whether *now* sat inside a credit window. What was inert was its variation **within** a case, between
+candidate slots — there the feature moved and the label did not, which does not zero a coefficient, it
+*attenuates* it. So 0.2375 was a blend of real between-case signal and noise-diluted within-case
+variation, and 0.3953 is what it becomes when the within-case part starts carrying signal too. The
+correct statement is not "the feature was dead" but "one of the two axes the feature varies along had
+been disconnected from the labels", which I could not have written before measuring.
+
+### The finding I did not predict, which matters more than the four I did
+
+Normalised regret, 20 paired worlds, same seeds, only the simulator's timing behaviour differing:
+
+| arm | in-dist before | in-dist after | shift before | shift after |
+|---|---|---|---|---|
+| logistic | 3.52% | 12.00% | 3.42% | 9.25% |
+| gbm | 3.83% | 11.18% | 3.40% | 9.90% |
+| lookup | 3.85% | 12.42% | 4.55% | 10.76% |
+
+**Regret roughly tripled for every arm.** And in the same comparison Brier slightly *improved*
+(logistic 0.09518 -> 0.09056).
+
+Those two facts together are the whole thesis of this project, arrived at accidentally. Before the fix
+every scheduled slot carried an identical true probability, so the candidate set contained large
+groups of exact ties and picking the "wrong" slot cost nothing. Regret was low because the hardest
+decision in the product — *when* to retry — had been silently deleted from the problem. Restoring it
+did not degrade the models; it restored a decision they can get wrong. Meanwhile the labels became
+more predictable in aggregate, because `salaryWindow` now genuinely predicts, so pooled probability
+accuracy went **up** while decision quality went **down**.
+
+Day 5 finding 2 argued that Brier and regret can dissociate because a pooled metric cannot see
+within-case ordering. It argued this from a ₹1,50,102 gap on one seed that a 20-world sweep then
+mostly attributed to noise. Here the two metrics move in *opposite directions* across the same
+intervention, which is a far stronger demonstration than the one I originally shipped — and it is
+stronger precisely because I was not looking for it.
+
+The uncomfortable part: every regret and "share of recoverable value" figure this repo printed before
+this commit was computed on the easier problem. They were not wrong arithmetic. They answered a
+question about a world in which retry timing did not matter, while the write-up presented them as
+answering a question about a world in which it is the central decision.
+
+### Where the ML layer actually earns its place, stated narrowly
+
+Under shift, logistic − lookup is −1.51% with t = −2.46 and logistic winning 15 worlds to 4. Before
+the fix the same comparison was −1.14%, t = −1.68, 10-9 — a coin flip. In distribution it remains not
+separable (t = −1.36), so the kill condition applies there and the honest report is "still not
+separable".
+
+The mechanism is checkable rather than asserted, and it predicts exactly that split. The fallback rate
+is 0.00% on both sets with 66 of 66 cells populated, so the advantage cannot be coverage. It is
+stale-mean: `TEST_PARAM_SHIFT` moves `TEMPORARILY_SHORT` from 0.24 to 0.27, and that is the *only*
+payer type whose recovery probability now depends on when a retry lands. So the shift adds 12.5% more
+of exactly the payers whose outcome is slot-dependent, the `(cause, action)` cell averages over a
+changed internal mix and cannot follow it, and a model reading `salaryWindow` can. In distribution the
+cells are fitted on the mix they are scored on, so there is little staleness to exploit — which is why
+the effect appears on one set and not the other, and why that asymmetry is evidence rather than noise.
+
+This is the "narrower version survives and this sweep cannot test it" paragraph that `select-arm` had
+been printing about itself since Day 5. It can test it now, and the answer is yes.
+
+What it does **not** establish is that ML beats a GROUP BY. The shift happens to move the population
+along the one axis the features can see and the cell key cannot, which is close to the best case for
+the ML arms. The claim the evidence supports is conditional: when the population moves in a way the
+features can represent and the key cannot, the ML layer earns its place. That is narrower than "ML
+wins" and it is what went into the report.
+
+### Two process defects found on the way
+
+**A pre-registration I broke by accident.** `npm run select-arm` defaults to ten worlds. The Day 6
+figure came from an explicit `--seeds=20`, and VERIFY.md section 6 told readers to expect "twenty
+independently generated worlds" from a command that runs ten — a documented instruction that does not
+match the code, which is the same family as the unrun verification instruction in the previous entry.
+Worse, I ran the default first and *saw* t = −1.98 in distribution and t = −2.22 under shift before
+realising the design mismatch. Re-running at 20 restored the pre-registered design, but I had already
+seen a result, and choosing between two numbers after seeing both is exactly what pre-registration
+exists to prevent. So both are recorded here, and the 20-world figures are the ones reported because
+20 was the design, not because of how they came out. A 6-world run, for what it is worth, separates on
+*both* sets — small-n runs are noisier in the flattering direction, which is itself a reason the
+default being 10 while the docs say 20 is not a harmless discrepancy.
+
+**A report that contradicted its own numbers, for the third time.** `armSelection.js` opened its
+mechanism section with the hard-coded words `The regret answer above is "not separable" on both sets`,
+and concluded that "the ML layer does not earn its place on this generator by accuracy". Both were
+true when written. After the fix the table two screens up said t = −2.46, separable — and the prose
+still announced that nothing had separated. The narrative is now a function of the computed
+separability flags, with three branches, all of which I confirmed reachable by running sweeps that hit
+them. A stale hard-coded conclusion is more dangerous than a wrong number: the number carries a
+standard error and invites scrutiny, while the sentence sounds like a considered judgement. This is
+the third instance of this specific failure in this project, after the Day 5 "the report generated its
+own numbers and hard-coded its own conclusions" and the labelled-with-data-it-had-not-used seed bug.
+
+### What is now stale
+
+The batch decision report moved: ACT 152 -> 159 cases, AWAIT_APPROVAL 34 -> 27, agent's own expected
+recovery ₹2,20,805 -> ₹2,43,414. The money shares barely moved (16.5% -> 16.7% and 74.4% -> 74.2%),
+because the seven cases that changed queue carry ₹4,193 between them. `requiresApproval` is a property
+of the *chosen* action, so those seven now select a differently-priced action that does not need a
+human — a benign consequence, checked rather than assumed.
+
+`model-report` moved on every split. The one worth recording is a claim this project used to lead
+with: on TEST, `logistic` used to leave ₹1,50,102 less money on the table than `gbm`, and VERIFY.md
+already carried a warning that the 20-world sweep did not reproduce that magnitude and the original
+write-up had leaned on it too hard. Post-fix the same gap is **₹5,249** — 1.2% of regret. So two
+independent routes, a paired multi-world sweep and a change to the ground truth, arrive at the same
+correction. The dissociation between Brier and regret is real; the rupee figure on one seed never was
+the evidence for it, and the far better evidence is this fix, where Brier improved and regret tripled
+in the same intervention.
+
+Also stale and now corrected in VERIFY.md: the lookup arm captures 89.1% of recoverable value on TEST,
+not 94%; the oracle captures 81.5% of the learnable Brier gap and picks the best action 70.8% of the
+time, not 82.2% and 67.0%.
+
+Suite is 402 tests, 402 pass, 0 fail, **0 todo**. The three pins are live assertions. Nothing else in
+the suite broke, and that is worth stating: not one existing test had priced a scheduled retry, which
+is precisely how a 25x effect survived 400 tests.
+
+One near-miss worth recording, because it is the same mistake this log opened the Day 6 entry with. I
+looked at the post-fix TEST table, saw `gbm 0.08163 / logistic 0.08220`, matched those against figures
+I half-remembered from the old write-up, and concluded out loud that `model-report` was *unaffected* by
+the fix — which would have been alarming, since `select-arm` had visibly tripled. It was a misreading:
+the numbers I was matching against had never been in VERIFY.md at all. A `diff` of the two runs settled
+it in thirty seconds and showed all 25 hunks changed. The lesson is not "be careful", it is that
+comparing a fresh number against a remembered one is not a check, and the cheap mechanical comparison
+was available the whole time.
+
+---
+

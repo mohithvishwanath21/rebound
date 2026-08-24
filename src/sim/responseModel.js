@@ -347,6 +347,59 @@ export function recoveryProbability({ action, latent, event, now, touchesUsed = 
   const kind = action.kind;
   const breakdown = {};
 
+  /**
+   * THE INSTANT THAT MATTERS IS THE ONE THE ACTION LANDS ON, NOT THE ONE IT WAS CHOSEN ON.
+   *
+   * This was wrong until Day 6 and the bug was silent, expensive and entirely invisible to the test
+   * suite. Every time-dependent factor below read `now` — the moment of the DECISION — which is by
+   * construction identical for every candidate being compared against each other. A retry scheduled
+   * for six hours' time and one scheduled for a week's time therefore received identical
+   * probabilities, all seven candidate slots tied to the paise in the decision engine, and the
+   * alphabetical tiebreak picked the winner.
+   *
+   * Three comments in this file asserted the opposite. `salaryWindowBoost` is described as "the
+   * largest single timing effect in the model" and as "the mechanism that rewards RETRY_SCHEDULED
+   * over RETRY_NOW"; the funds branch below claims its decay is "what makes *which* scheduled slot
+   * the agent picks matter". None of that could be true while the only clock consulted was the
+   * decision clock. Measured before the fix, for a TEMPORARILY_SHORT payer with a credit two days
+   * out, the +6h / +3d / +9d slots were 0.032094 / 0.032094 / 0.032094; after it they are
+   * 0.031146 / 0.800953 / 0.244365.
+   *
+   * Two consequences worth stating, because they are the reason this is a real fix and not a
+   * cosmetic one:
+   *
+   *   - `preFundsPenalty` was being levied on retries deliberately timed to land AFTER the money
+   *     arrives. The penalty for charging an empty account was applied to the act of avoiding it.
+   *   - Age decay moves here too, and that is what makes the trade-off honest rather than a free
+   *     lunch. Scheduling later buys proximity to a salary credit and pays for it in decay, so
+   *     "wait for the 1st" stops being unconditionally correct and becomes an optimisation with a
+   *     real cost on both sides. A version that moved only the funds branch would have made
+   *     scheduling strictly better the longer you waited.
+   *
+   * This also brings the simulator into line with the rest of the system rather than introducing a
+   * new idea: `src/agent/guardrails.js` already evaluates TIMING rules at the execution instant, and
+   * `src/ml/features.js` already computes `salaryWindow` from `action.scheduledFor` with a comment
+   * saying it is "applied to the time the money would actually be taken". The feature builder and
+   * the guardrails were right. The ground truth was the one layer that disagreed, which is the worst
+   * layer to be wrong because everything else is measured against it.
+   */
+  let effectiveAt = now;
+  if (action.scheduledFor) {
+    const at = new Date(action.scheduledFor);
+    if (Number.isNaN(at.getTime())) {
+      // Not defensive padding. An invalid date yields NaN from every arithmetic operation below,
+      // NaN propagates through the multiplications without throwing, and `clamp01(NaN)` returns
+      // NaN — so the case would be priced at a probability that is neither high nor low and every
+      // comparison against it would be false. A crash is the only honest outcome.
+      throw new TypeError(`recoveryProbability: action.scheduledFor is not a valid date: ${action.scheduledFor}`);
+    }
+    // A slot in the past cannot land before it was decided. Clamping rather than throwing because
+    // a stale scheduled action arriving late is a normal operational event, not a programming error.
+    effectiveAt = at.getTime() > now.getTime() ? at : now;
+  }
+  breakdown.effectiveAt = effectiveAt.toISOString();
+  breakdown.scheduledDelayHours = Number(((effectiveAt.getTime() - now.getTime()) / 3_600_000).toFixed(2));
+
   // Actions that cannot themselves collect money.
   if (kind === ActionKind.STOP_PERMANENT || kind === ActionKind.NO_ACTION_YET) {
     return { p: 0, breakdown: { reason: 'action collects no money directly' } };
@@ -370,8 +423,10 @@ export function recoveryProbability({ action, latent, event, now, touchesUsed = 
   }
 
   // --- 2. Downtime: retrying into a live outage -----------------------------
+  // Evaluated at `effectiveAt`: an outage that has ended by the time a scheduled retry lands does
+  // not penalise it, and scheduling past a known outage is a legitimate thing for a policy to do.
   if (isRetry(kind) && latent.trueDowntimeWindow?.start && latent.trueDowntimeWindow?.end) {
-    const t = now.getTime();
+    const t = effectiveAt.getTime();
     const inWindow =
       t >= new Date(latent.trueDowntimeWindow.start).getTime() &&
       t <= new Date(latent.trueDowntimeWindow.end).getTime();
@@ -384,14 +439,14 @@ export function recoveryProbability({ action, latent, event, now, touchesUsed = 
   // --- 3. Funds timing for the cash-flow-constrained ------------------------
   if (latent.payerType === PayerType.TEMPORARILY_SHORT && latent.fundsAvailableFrom) {
     const fundsAt = new Date(latent.fundsAvailableFrom).getTime();
-    if (now.getTime() < fundsAt) {
+    if (effectiveAt.getTime() < fundsAt) {
       p *= A.preFundsPenalty;
       breakdown.preFunds = A.preFundsPenalty;
     } else {
       // Boost decays over the days following the credit — money arrives and then
       // gets spent, so the window is real but narrow. This is what makes *which*
       // scheduled slot the agent picks matter, not merely that it scheduled at all.
-      const daysSinceFunds = (now.getTime() - fundsAt) / DAY_MS;
+      const daysSinceFunds = (effectiveAt.getTime() - fundsAt) / DAY_MS;
       const windowFactor = Math.exp(-daysSinceFunds / 5);
       const boost = 1 + (A.salaryWindowBoost - 1) * windowFactor;
       p *= boost;
@@ -400,7 +455,9 @@ export function recoveryProbability({ action, latent, event, now, touchesUsed = 
   }
 
   // --- 4. Age decay ---------------------------------------------------------
-  const ageDays = Math.max(0, (now.getTime() - new Date(event.occurredAt).getTime()) / DAY_MS);
+  // Also at `effectiveAt`, and this is what prices the cost of waiting. See the docblock above:
+  // without it, scheduling later would be free and the optimum would always be "wait".
+  const ageDays = Math.max(0, (effectiveAt.getTime() - new Date(event.occurredAt).getTime()) / DAY_MS);
   const decay = Math.exp(-(A.decayPerDay[event.lossType] ?? 0.08) * ageDays);
   p *= decay;
   breakdown.ageDecay = decay;

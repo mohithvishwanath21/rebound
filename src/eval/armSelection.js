@@ -625,10 +625,40 @@ export function formatSelectionReport(r) {
   describe(shLogVsLookup, 'Under shift    ');
   L.push('');
 
+  /**
+   * WHY THESE TWO FLAGS EXIST INSTEAD OF A SENTENCE.
+   *
+   * Everything below used to open with the hard-coded words 'The regret answer above is "not
+   * separable" on both sets'. That was true when it was written and stopped being true the moment
+   * the retry-timing fix landed: the under-shift row crossed the bar (t = -2.46) while the prose two
+   * screens down still announced that neither had, and still concluded that the ML layer "does not
+   * earn its place on this generator by accuracy".
+   *
+   * This is the third instance in this project of one specific failure: a report that computes its
+   * numbers honestly and then states a conclusion from memory. The Day 5 entry "The report generated
+   * its own numbers and hard-coded its own conclusions" is the same bug, and the fix there was the
+   * same as the fix here — the narrative has to be a function of the table, so that changing the
+   * world changes the words. A report that cannot contradict its author is not evidence.
+   *
+   * The reason it is worth a comment rather than a quiet edit: a stale hard-coded conclusion is more
+   * dangerous than a wrong number, because the number carries its own standard error and invites
+   * scrutiny while the sentence sounds like a considered judgement.
+   */
+  const sepInDist = idLogVsLookup ? Math.abs(idLogVsLookup.t) >= T_THRESHOLD : false;
+  const sepShift = shLogVsLookup ? Math.abs(shLogVsLookup.t) >= T_THRESHOLD : false;
+  const sepCount = (sepInDist ? 1 : 0) + (sepShift ? 1 : 0);
+
   if (r.coverage) {
     const c = r.coverage;
-    L.push('  The regret answer above is "not separable" on both sets, so here is the mechanism measured');
-    L.push('  directly instead — how often the GROUP BY had no cell to read and served the base rate:');
+    L.push(sepCount === 0
+      ? '  The regret answer above is "not separable" on either set, so here is the mechanism measured'
+      : sepCount === 2
+        ? '  The regret answer above separates on both sets. The mechanism behind it, measured directly —'
+        : `  The regret answer above separates ${sepShift ? 'under shift but NOT in distribution' :
+            'in distribution but NOT under shift'}, which is itself a claim about the mechanism. Measured directly —`);
+    L.push(sepCount === 0
+      ? '  directly instead — how often the GROUP BY had no cell to read and served the base rate:'
+      : '  how often the GROUP BY had no cell to read and served the base rate:');
     L.push('');
     L.push(`    in distribution   ${pct(c.inDist.mean)} of scored rows on a fallback ` +
       `(${pct(c.unseenInDist.mean)} on a cell never seen at all)`);
@@ -657,12 +687,38 @@ export function formatSelectionReport(r) {
       L.push('  can track that; a cell mean cannot. Separating rate-staleness from coverage-loss needs a');
       L.push('  shift that changes the cause mix itself, which is a Day 8-9 sensitivity job.');
       L.push('');
-      L.push('  The blunt reading of section A, stated plainly because it is the result: with 66 cells and');
-      L.push(`  roughly ${(w0.counts.innerFitEvents * 33).toLocaleString('en-IN')} fit rows, a GROUP BY has enough data per cell to be as good as`);
-      L.push('  anything I fitted. The ML layer does not earn its place on this generator by accuracy, and');
-      L.push('  Day 5 claiming it did was reading one seed. What the ML layer does earn its place on is');
-      L.push('  calibration under a value-weighted decision and the ability to score an action it has few');
-      L.push('  rows for — both of which Day 6 exercises and neither of which this table measures.');
+      if (sepShift && !sepInDist) {
+        // The state the repo is actually in after the retry-timing fix, and the most interesting of
+        // the three, so it says what the evidence supports and no more.
+        L.push('  READ THE TWO SETS TOGETHER, BECAUSE THEY DISAGREE AND THE DISAGREEMENT IS THE RESULT.');
+        L.push('  In distribution the GROUP BY is still not separably worse: with 66 cells and roughly');
+        L.push(`  ${(w0.counts.innerFitEvents * 33).toLocaleString('en-IN')} fit rows it has enough data per cell to match anything fitted here, and`);
+        L.push('  Day 5 claiming otherwise was reading one seed. Under shift it IS separably worse. Since');
+        L.push('  the fallback rate is zero on both sets, the gap cannot be coverage — it is the stale-mean');
+        L.push('  mechanism above: the cells still exist, but the population inside them has moved, and a');
+        L.push('  stored mean cannot follow it while a model reading the features can.');
+        L.push('');
+        L.push('  WHAT THIS DOES NOT ESTABLISH. That a shift of this particular shape generalises. The');
+        L.push('  shift moves the payer mix toward TEMPORARILY_SHORT (0.24 -> 0.27), and that is the only');
+        L.push('  payer type whose recovery probability depends on WHEN a retry lands — so this is close to');
+        L.push('  the best case for a model that reads timing features against a table that cannot. The');
+        L.push('  honest claim is conditional: when the population moves in a way the features can see and');
+        L.push('  the cell key cannot, the ML layer earns its place. That is a narrower claim than "ML');
+        L.push('  wins", and it is the one the evidence supports.');
+      } else if (sepCount === 0) {
+        L.push('  The blunt reading of section A, stated plainly because it is the result: with 66 cells and');
+        L.push(`  roughly ${(w0.counts.innerFitEvents * 33).toLocaleString('en-IN')} fit rows, a GROUP BY has enough data per cell to be as good as`);
+        L.push('  anything I fitted. The ML layer does not earn its place on this generator by accuracy, and');
+        L.push('  Day 5 claiming it did was reading one seed. What the ML layer does earn its place on is');
+        L.push('  calibration under a value-weighted decision and the ability to score an action it has few');
+        L.push('  rows for — both of which Day 6 exercises and neither of which this table measures.');
+      } else {
+        L.push('  The ML layer is separably better than the GROUP BY on ' +
+          `${sepCount === 2 ? 'both sets' : 'the in-distribution set only'}, with a fallback rate of zero,`);
+        L.push('  so the advantage is not coverage. It has to come from the features: the arms read columns');
+        L.push('  the cell key cannot represent. Which columns, and whether the advantage survives a shift');
+        L.push('  of a different shape, is a Day 8-9 question this sweep does not answer.');
+      }
     } else if (Math.abs(c.paired.t) >= T_THRESHOLD) {
       L.push('  That difference IS separable, which makes the degradation a measured fact even though');
       L.push('  its effect on regret is not. The honest statement of the result is therefore narrow: the');

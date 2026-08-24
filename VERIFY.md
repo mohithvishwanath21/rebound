@@ -29,8 +29,8 @@ Verify the five commands it runs, rather than trusting the label:
 
     npm test
 
-Expect `# pass 397`, `# fail 0`, `# todo 3`. Roughly 7 seconds. The three `todo` entries are a
-deliberately pinned defect, not unfinished work — see section 8.
+Expect `# pass 402`, `# fail 0`, `# todo 0`. Roughly 7 seconds. Section 8 explains why the count moved
+and why there are no longer any `todo` entries.
 
 The tests are in three deliberately separate categories, and the distinction matters more than the
 count:
@@ -126,29 +126,33 @@ Both should print one clean line, not a stack trace.
 About 15 seconds. Five arms scored on three splits. What to look at, in order:
 
 **The floor.** Each split prints `floor`, the exact expected Brier of a perfectly-informed predictor,
-`mean(p(1-p))`. It is a closed form, not an estimate, and it is why "Brier 0.085" is reported as
-"30.5% of the learnable gap captured" instead. Without it the raw number is unreadable.
+`mean(p(1-p))`. It is a closed form, not an estimate, and it is why "Brier 0.08220" is reported as
+"30.8% of the learnable gap captured" instead. Without it the raw number is unreadable.
 
 **The lookup table.** A `(cause, action)` GROUP BY with no model in it. It is the baseline most ML
-write-ups omit, and omitting it is how a project takes credit for a lookup table. It captures 94% of
+write-ups omit, and omitting it is how a project takes credit for a lookup table. It captures 89.1% of
 recoverable value on TEST. Any claim the ML layer makes has to be measured against this, not against
 zero.
 
 **The oracle.** An arm that reads the latent truth. It cannot be shipped; it exists to bound the
-problem. It captures 82.2% of the learnable Brier gap and still only picks the best action 67.0% of
-the time, which says how much of the remaining error is irreducible rather than unmodelled.
+problem. It captures 81.5% of the learnable Brier gap and still only picks the best action 70.8% of
+the time, which says how much of the remaining error is irreducible rather than unmodelled. That it
+picks the best action barely two cases in three is the most quietly informative number in the report:
+even perfect knowledge of the latent state leaves a hard decision.
 
-**The two columns that disagree.** On TEST, `gbm` has the better Brier and AUC while `logistic` leaves
-₹1,50,102 less money on the table. On VALID the same split is starker: `gbm` has the *best* Brier of
-any honest arm and the *worst* regret. Brier and AUC are pooled over all rows; an action is chosen by
-ranking candidates within a single case. A pooled metric cannot see within-case ordering, and only
-within-case ordering spends money.
+**The two columns that disagree.** On TEST, `gbm` has the better Brier (0.08163 vs 0.08220) and AUC
+(0.7556 vs 0.7499), while `logistic` leaves less money on the table (regret ₹4,39,267 vs ₹4,44,516)
+and picks the best action more often (61.1% vs 59.6%). Brier and AUC are pooled over all rows; an
+action is chosen by ranking candidates within a single case. A pooled metric cannot see within-case
+ordering, and only within-case ordering spends money.
 
-> **Read that ₹1,50,102 as one draw.** The 20-world sweep in section 6 does not reproduce it: averaged
-> over many worlds, `logistic` wins *both* Brier and regret, and the regret gap to `gbm` is 0.31% ±
-> 0.32% — indistinguishable from zero. So the mechanism above is real and worth understanding, but the
-> magnitude on this seed is mostly noise, and the original write-up leaned on it too hard. The general
-> claim that survives is the mechanism, not the rupee figure.
+> **The rupee gap here is ₹5,249 and you should not lean on it.** An earlier version of this file
+> reported this same disagreement as a ₹1,50,102 gap and warned that the 20-world sweep in section 6
+> did not reproduce it. After the retry-timing fix in section 8 the gap on this seed collapsed to
+> ₹5,249 — 1.2% of regret — which is what the sweep had been saying all along. Two independent routes
+> to the same correction. The *mechanism* (pooled metrics cannot see within-case ordering) is real and
+> is demonstrated far more strongly by the timing fix itself, where Brier improved and regret tripled
+> at the same time. The rupee figure on any single seed is not the evidence for it.
 
 **The coefficient table.** Fifteen lines of log-odds with support counts. This is the audit surface —
 each line is a falsifiable claim about the world that a reviewer can disagree with without reading
@@ -164,8 +168,18 @@ numbers and hard-coded its own conclusions" for the version where it did not.
 
     npm run select-arm
 
-About 90 seconds. Twenty independently generated worlds, and it is the only command allowed to decide
-which model the Day 6 decision engine is built on.
+About 50 seconds. **Ten** independently generated worlds by default, and it is the only command
+allowed to decide which model the Day 6 decision engine is built on.
+
+The figures quoted below are from **twenty** worlds, which is the design the comparison was
+pre-registered at, so reproduce them with:
+
+    node src/eval/cli/select-arm.js --seeds=20
+
+About 95 seconds. Note that an earlier version of this file said the command itself ran twenty — it
+does not, and running the ten-world default first, before noticing, is written up as a process defect
+in the Day 6 addendum. Fewer worlds are noisier in the *flattering* direction here: a six-world run
+separates on both scoring sets where twenty separates on only one.
 
 **Why it exists.** The Day 5 report picked an arm by reading the held-out TEST batch. That is
 selection on the test set, and it silently converts a held-out number into a fitted one. The report
@@ -191,17 +205,46 @@ Three arms — `logistic`, `gbm`, `lookup` — cannot be separated at the pre-de
 the choice fell to a preference order written into `src/eval/armSelection.js` before the sweep was
 first run. A preference is labelled as a preference and never as a finding.
 
-The `logistic vs lookup` row: **−0.32% ± 0.29%, t = −1.09, and lookup wins 11 worlds to 8.** The mean
-and the sign count point opposite ways, which means the mean is being carried by a few worlds. Both
-are printed for exactly that reason. Read together they say the ML layer does **not** measurably beat
-a GROUP BY on this generator — the opposite of what the Day 5 write-up claimed.
+The `logistic vs lookup` rows, of which there are two and they **disagree**:
+
+    In distribution: logistic − lookup = -0.42% regret, t = -1.36, logistic won 14-6 of 20 worlds.
+      NOT separable at the pre-declared bar — on this evidence the two are equivalent.
+    Under shift    : logistic − lookup = -1.51% regret, t = -2.46, logistic won 15-4 of 20 worlds.
+      Separable at the pre-declared bar, in favour of logistic.
+
+In distribution the ML layer still does **not** measurably beat a GROUP BY — the opposite of what the
+Day 5 write-up claimed. Under shift it does. Before the retry-timing fix neither separated (−1.14%,
+t = −1.68, 10-9 — a coin flip), so the fix is what made the second row detectable.
+
+The asymmetry is the evidence, not a nuisance. The fallback rate is 0.00% on both sets with 66 of 66
+cells populated, so the advantage cannot be coverage — it is a stale cell mean. `TEST_PARAM_SHIFT`
+moves `TEMPORARILY_SHORT` from 0.24 to 0.27, and that is the *only* payer type whose recovery
+probability depends on when a retry lands, so the shift adds 12.5% more of exactly the payers whose
+outcome is slot-dependent. A `(cause, action)` cell averages over the changed mix and cannot follow it;
+a model reading `salaryWindow` can. In distribution the cells are fitted on the mix they are scored on,
+so there is little staleness to exploit — which is why the effect shows up on one set and not the other.
+
+> **What this does not establish.** That ML beats a GROUP BY. This shift moves the population along
+> the one axis the features can see and the cell key cannot, which is close to the best case for the ML
+> arms. The supported claim is conditional: when the population moves in a way the features can
+> represent and the key cannot, the ML layer earns its place.
 
 The coverage block: `0.00% of scored rows on a fallback` on both scoring sets, 66 of 66 cells
-populated. That number falsified my own explanation for the contradiction. I had predicted the GROUP
-BY degrades under distribution shift because its stored cells go stale; the shift moves payer mix,
-error-text vagueness and amounts, but adds no new cause and no new action, so the cell *set* is
-identical either side and there is no coverage to lose. More worlds would not have helped — the
-hypothesis was wrong, not underpowered.
+populated. That number falsified my original explanation, and the correction is worth following
+because two hypotheses were hiding inside one sentence.
+
+I had predicted the GROUP BY degrades under shift because its stored cells **go missing** — new
+situations arrive, the table has no row, it serves a base rate. That is coverage loss, and it is
+flatly false here: the shift moves payer mix, error-text vagueness and amounts, but adds no new cause
+and no new action, so the cell *set* is identical either side and there is nothing to lose. More
+worlds would not have helped; the hypothesis was wrong, not underpowered.
+
+The version that survived is different and sharper: the cells are all present, but each one now
+**averages over a different internal mix**, so a stored mean is stale rather than absent. `select-arm`
+had been printing that narrower hypothesis about itself since Day 5 with the note that the sweep could
+not test it. After the retry-timing fix it can, and it is what the separable under-shift row above is
+measuring. "The lookup has no row" and "the lookup's row is now the wrong number" are different
+failures, only one of them is visible in a coverage statistic, and I had been treating them as one.
 
 **Verify it cannot cheat.** The reserved batch is `seed: 'day4'`, and the sweep has no expression that
 could produce it:
@@ -230,13 +273,13 @@ reasons, both human queues, and a full audit trail for one case.
 Read the two share columns against each other first:
 
     outcome             cases   share       at risk   share   exp. recovery
-    ACT                   152   76.0%      ₹3,43,977  16.5%        ₹37,751
-    AWAIT_APPROVAL         34   17.0%     ₹15,50,661  74.4%      ₹1,83,053
+    ACT                   159   79.5%      ₹3,48,170  16.7%        ₹42,129
+    AWAIT_APPROVAL         27   13.5%     ₹15,46,468  74.2%      ₹2,01,286
     ESCALATE_HUMAN         12    6.0%      ₹1,87,933   9.0%             ₹0
     STOP_PERMANENT          2    1.0%           ₹268   0.0%             ₹0
 
-They disagree on purpose. 76% of *cases* are acted on automatically and they carry 16.5% of the
-*money*; the 17% held for approval carry 74.4%. A recovery agent that treated cases as
+They disagree on purpose. 79.5% of *cases* are acted on automatically and they carry 16.7% of the
+*money*; the 13.5% held for approval carry 74.2%. A recovery agent that treated cases as
 interchangeable would show these columns tracking each other. Value, not count, is the entire thesis.
 
 **The column most worth attacking.** `exp. recovery` is the agent's own arithmetic — the sum of the
@@ -270,33 +313,76 @@ a real merchant would have (`cause | action | matchTier | touchesUsed`, 408 cell
 0.3% unseen and 4.3% fallback. The mechanism is carried by `test/recoveryModel.test.js`, not by this
 batch.
 
+**A second limitation, and this one is a defect rather than a property of the generator.** In the
+audit trail printed by `--explain`, the scheduled retries are all priced identically:
+
+    rank  action                                      EV   verdict
+    1     RETRY_NOW                                  ₹37   ALLOW  <- chosen
+    2     RETRY_SCHEDULED:2026-08-24T15:30:          ₹31   ALLOW
+    3     RETRY_SCHEDULED:2026-08-24T21:30:          ₹31   ALLOW
+    ...   (seven slots, spanning a week, all ₹31)
+
+Seven candidates tied to the paise is not a coincidence, and chasing exactly this tie is what found
+the defect in §8. That half is fixed: the simulator now separates those slots by up to 25x. This half
+is not. The engine scores with `createRecoveryScorer({ model: lookup, ... })` — a
+`(diagnosedCause, actionKind)` GROUP BY — and two slots sharing a kind share a cell by construction,
+so no amount of feature work can make the shipped model see the difference. The tie is then resolved
+alphabetically, which for ISO-8601 UTC means the soonest slot wins.
+
+Worth being blunt about what that costs: before the simulator was fixed this blindness was free,
+because the true rates were identical too. Now the ground truth cares and the agent cannot, so it is
+live error, and it is part of why regret tripled in §6. `test/retryTiming.test.js` pins it with a
+passing test whose docblock says it documents a limitation rather than a solved problem.
+
+There is a related gap in the same area, stated because a reader will otherwise find it and wonder:
+`npm run select-arm` prints `SELECTED: logistic`, and this command uses `lookup+platt`. The logistic
+arm already consumes `salaryWindow`, `delayDays` and `isScheduled` from `src/ml/features.js`, so the
+selection procedure's own verdict points at an arm that can represent the thing the shipped one
+cannot. Nothing in `decide-report.js` currently justifies the divergence. Both are open.
+
 **Reproducibility.** `DEFAULT_NOW` is fixed at `2026-08-24T09:30:00Z`. Using `new Date()` would make
 quiet hours, case age and retry gaps irreproducible — the same command would give different answers
 before and after 21:00 IST. Pass `--now` to move it deliberately.
 
 ---
 
-## 8. The three failing tests you are supposed to see
-
-    npm test
-
-Expect **400 tests, 397 pass, 0 fail, 3 todo**. The three `todo` entries in
-`test/retryTiming.test.js` are not incomplete work that was forgotten; they are a defect found on
-Day 6, pinned deliberately, and left visible:
+## 8. The defect that was pinned, then fixed — and what fixing it did to every other number
 
     node src/eval/cli/probe-timing.js
 
-The simulator's `recoveryProbability` never reads `action.scheduledFor`. It computes the salary-window
-timing boost from `now` — the decision instant — which is identical for every candidate being compared
-against each other. For a cash-flow-constrained payer whose salary lands in two days, all three
-scheduled offsets are labelled `p = 0.032094`; honouring the instant the retry actually lands gives
-0.031 / **0.801** / 0.244. A 25× effect, invisible to the ground truth, on the decision this product is
-most distinctive about.
+The simulator's `recoveryProbability` used to ignore `action.scheduledFor`. It computed the
+salary-window timing boost from `now` — the decision instant — which is identical for every candidate
+being compared against each other. For a cash-flow-constrained payer whose salary lands in two days,
+all three scheduled offsets were labelled `p = 0.032094`. Honouring the instant the retry actually
+lands gives 0.031 / **0.801** / 0.244: a 25× effect, invisible to the ground truth, on the decision
+this product is most distinctive about.
 
-The tests are `todo` rather than passing assertions of current behaviour, because a green test saying
-timing does not matter would eventually be read as a specification. They are `todo` rather than
-failing, because a red suite trains you to ignore red. Full write-up, including why fixing the
-simulator alone would make things *worse*, is the last Day 6 entry in `ENGINEERING_LOG.md`.
+The probe prints the case priced both ways. **Both blocks now agree** — that is the point of running
+it, and it is why the file is kept rather than deleted. Its second block was always what the comments
+claimed; the first block is what the code did.
+
+The three `todo` tests in `test/retryTiming.test.js` are now live assertions, joined by two more the
+fix itself demanded. **Expect 402 tests, 402 pass, 0 fail, 0 todo.**
+
+    node --test test/retryTiming.test.js
+
+The test worth reading is `waiting longer is not free, so the optimum is interior rather than "wait
+forever"`. Moving only the funds branch to the landing instant would have made waiting free — the
+boost arrives if you wait and nothing charges you for waiting — so the optimal policy would have been
+to schedule as late as the guardrails permit. Age decay had to move too. With both moved, +3d beats
+both +6h and +9d, which is the shape a timing decision has to have to be a decision.
+
+**What this did to the rest of the repo, which is the part worth attacking.** Normalised regret
+roughly *tripled for every arm* (logistic 3.52% → 12.00% in distribution), while Brier slightly
+*improved* (0.09518 → 0.09056). Before the fix, every scheduled slot carried an identical true
+probability, so picking the wrong slot cost nothing and regret was low because the hardest decision in
+the product had been deleted from the problem. Restoring it did not degrade the models; it restored a
+decision they can get wrong.
+
+So every regret figure this repo printed before that commit was computed on an easier problem. The
+arithmetic was right and the question was wrong. The full write-up, including four pre-registered
+predictions and how they scored — one of them on a **falsified premise** — is the Day 6 addendum in
+`ENGINEERING_LOG.md`.
 
 ---
 
