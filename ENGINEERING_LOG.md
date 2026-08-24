@@ -915,3 +915,245 @@ The residual unsafe-retry risk now lives almost entirely in one place: UNKNOWN i
 default is a policy question, not a diagnosis question, and Day 6 owns it.
 
 ---
+
+## [Day 5] An identity I asserted, a residual a thousand times too large, and the error flattered me
+
+**Symptom:** `brierDecomposition` asserted Murphy's classic three-term identity, `Brier =
+reliability − resolution + uncertainty`, and expected a recomposition residual somewhere around
+1e-15. The measured residual was −1.05e-3 — a thousand times too large to be floating point.
+
+**First hypothesis:** An indexing bug. The reliability curve and the decomposition each re-derive bin
+membership, so the obvious suspect was the two of them disagreeing about which row sat in which bin.
+
+**Root cause:** The identity is exact only when every prediction inside a bin is *identical*. That is
+true of a forecaster emitting a handful of discrete values — a weather service that only ever says
+10%, 20%, 30% — and it is not true of a continuous model chopped into equal-count bins. Expanding
+`(pᵢ − yᵢ)²` around each bin's mean prediction rather than treating the bin as constant produces two
+further terms, and the textbook version silently drops both:
+
+    Brier = reliability − resolution + uncertainty + withinBinVariance − 2·withinBinCovariance
+
+**Fix:** Compute and report all five terms, and assert the five-term recomposition to 1e-12 in
+`test/ml.test.js`. The comment that claimed an exact three-term identity now says what is actually
+true and why, so the next person to read it does not have to rediscover this.
+
+**Lesson:** The *sign* of the residual was the useful part, and I nearly did not look at it. Negative
+means the covariance term dominates: even inside a single bin, the model's higher predictions still
+correspond to higher observed recovery. That is genuine discriminating power which a 10-bin grouping
+is too coarse to credit, so the `resolution` term was *understating* the model. The residual was
+hidden resolution, not hidden error. Which is the more dangerous direction for a discrepancy to point
+in, because an anomaly that flatters you is one you are inclined to accept and move on from — and I
+would have, if the magnitude had been 1e-5 instead of 1e-3.
+
+---
+
+## [Day 5] The same report, run twice, two minutes apart, printed different numbers
+
+**Symptom:** `npm run model-report` was not reproducible. Two runs minutes apart moved the GBM's
+held-out regret from ₹1,70,078 to ₹1,77,087, and the logistic arm's ECE in the fourth decimal place —
+with every seed in the pipeline fixed and every model deterministic.
+
+**First hypothesis:** An unseeded `Math.random()` somewhere in the feature or dataset path. I went
+looking for one. There wasn't one.
+
+**Root cause:** `generateBatch({ seed, split, now = new Date() })` defaults `now` to wall-clock time.
+The seeded RNG decides the *shape* of each event — cause, amount, payer type, how many days before
+`now` it happened — but `now` decides where that shape lands on a calendar. Two features read the
+calendar: `ageDays`, and `salaryWindowProximity`, which reads the day of the month. Shift the anchor
+and those two features shift, so the recovery probabilities shift, so the Bernoulli draws shift, so
+every model trains on subtly different data. An event anchored at 23:59 on the 31st and the same event
+anchored at 00:01 on the 1st are not the same event.
+
+**Fix:** `src/eval/evalClock.js` — one frozen instant, `2026-08-22T00:00:00Z`, that every evaluation
+anchors to explicitly. Deliberately mid-month: anchoring on the 1st would put every generated event
+inside the salary-credit window, make `salaryWindowProximity` nearly constant, and quietly destroy
+the timing signal the model is supposed to learn. `evalNow()` returns a fresh `Date` each call so a
+caller mutating it cannot corrupt every later evaluation. The default in `generateBatch` stays, because
+it is correct for its other caller — `npm run seed` populates a database the dashboard serves, and
+events dated to a hard-coded day in the past would make the UI nonsensical. The bug was never the
+default; it was an evaluation relying on one.
+
+**Lesson:** The drift was small, well under a percentage point, and that is exactly what made it
+dangerous rather than tolerable. A run-to-run wobble of that size is the same magnitude as a real
+improvement from a modelling change, so every A/B comparison across runs would have been measuring
+the clock as much as the change. Also worth being precise about Day 4: its numbers are unaffected,
+because diagnosis reads the failure payload and never reads a timestamp. That is reproducibility by
+luck of what the code happens to depend on, not by design — the same bug with no consequences yet,
+which is not the same thing as not having the bug.
+
+---
+
+## [Day 5] I watched the test set to decide when to stop training
+
+**Symptom:** An early GBM smoke test showed the model looking excellent and still improving at round
+200. Encouraging, and false.
+
+**First hypothesis:** No hypothesis — this is the failure I did not notice as a failure. It looked
+like a good result.
+
+**Root cause:** That smoke test passed the TEST rows in as `validation`. Early stopping uses
+`validation` to choose when to stop and which round to keep, so watching TEST to make that decision
+makes TEST part of training. The resulting number is in-sample wearing a held-out label. When I
+re-ran it with validation carved out of the *training* split instead, the boosting curve told a
+different story: validation loss bottomed around round 150 at 0.3219 and then climbed steadily to
+0.3253 by round 299. Textbook overfitting, plainly visible — but only because the curve was printed
+per round rather than summarised into a final loss.
+
+**Fix:** `validation` must come from the training split, documented at the parameter. Early stopping
+now also *truncates* the ensemble back to `bestRound + 1` rather than keeping the extra trees and
+merely reporting where the best round was — reporting it without truncating means shipping the
+overfitted model and printing a note about it. On the current seed the GBM grows 209 trees and keeps
+179, best round 178. `test/ml.test.js` pins `treesUsed === bestRound + 1`.
+
+**Lesson:** Two separate things. The fix is the split, not the metric — no amount of care about which
+loss you watch helps if you are watching it on the wrong rows. And a summarised final loss cannot show
+you a curve that turned; the only reason this was catchable at all is that the report prints the whole
+boosting history. Printing more than you think you need is how you find the thing you were not
+looking for.
+
+---
+
+## [Day 5] Four days of "different seeds" were all the same seed
+
+**Symptom:** A test I wrote almost as an afterthought, and nearly did not write for being too obvious
+to bother with — two different seeds should produce two different train/test splits — failed. Then it
+got worse: four different string seeds all derived the identical child seed, **3110982872**.
+
+**First hypothesis:** A cache in the dataset builder, or `deriveSeed` being handed a constant
+somewhere up the call stack that I had not noticed.
+
+**Root cause:** `makeRng` and `deriveSeed` both began with `seed >>> 0`. Correct for numbers. For
+strings, catastrophic: `>>>` coerces its operand with ToUint32, ToUint32 of a non-numeric string is
+`NaN`, and `NaN >>> 0` is `0`.
+
+    'day4'     >>> 0  ===  0
+    'day5'     >>> 0  ===  0
+    'anything' >>> 0  ===  0
+
+So every string seed collapsed to zero and `deriveSeed(parent, label)` hashed only the label. Every
+named seed used anywhere in this repo, across four days of work, produced byte-identical customers,
+byte-identical events, byte-identical Bernoulli outcome draws, byte-identical fit/validation splits
+and byte-identical GBM subsamples. The `--seed` flag was decorative.
+
+**Fix:** `hashSeed()` — FNV-1a over strings, and a bit-mixer rather than a truncation for numbers, so
+that adjacent integer seeds give well-separated streams (sequential seeds are the common case in a
+sensitivity sweep, and mulberry32 started from adjacent state produces visibly correlated early
+output). Anything that is not a finite number or a string now throws a `TypeError`, so an unhashable
+seed is an error at the call site instead of a silent fall back to stream zero. `deriveSeed` joins
+seed and label with a NUL byte, because plain concatenation would let `('day', '5events')` and
+`('day5', 'events')` collide — a much smaller bug of precisely the same species. `test/rng.test.js`
+pins all of it, including that every character of the seed contributes and not just the first or last.
+
+**Lesson:** This survived four days because it broke the property nobody was testing while preserving
+the one everybody was. Runs were still perfectly *deterministic* — `npm test` passed, the report
+reproduced byte-for-byte, and the reproducibility claim in the README was true. What was silently
+false was seed *variation*, which is a different property, and the one underwriting every sentence of
+the form "this result is not an artefact of one particular draw." Determinism and variation are not
+the same guarantee and verifying one tells you nothing about the other. A `--seed` flag that does
+nothing is worse than no flag at all, because its presence invites exactly the claim it cannot
+support. The general form: when a bug disables variation, every test of reproducibility passes
+*harder*.
+
+---
+
+## [Day 5] The seed fix broke a test, and the test deserved to break
+
+**Symptom:** With seed hashing fixed, `[SIM] a settling disputer is credited the haircut, not the
+invoice` failed for the first time in four days.
+
+**First hypothesis:** The fix had changed simulator behaviour, and the settlement path was now wrong.
+
+**Root cause:** It had not. Nothing in the settlement logic changed — the *stream* changed. The test
+drew 60 samples from `seed: 3` and asserted that at least one produced a partial settlement, which had
+always depended on getting a lucky draw. Its own failure message admitted this: it read, in effect,
+"if this fails, try another seed." That is a note-to-self that the assertion was measuring the seed
+rather than the code.
+
+**Fix:** Sweep seeds 1 through 12, 60 draws each, and assert the behaviour appears somewhere in the
+sweep. The test now records in a comment that it passed for weeks and broke the moment `deriveSeed`
+started working.
+
+**Lesson:** A green test whose failure message tells you to change the seed was never testing what its
+name claims. Note the ordering, because it is the more useful half: the seed bug was *hiding* this
+brittleness, since a frozen stream makes a lucky draw look like a law. Fixing infrastructure should be
+expected to expose tests that had been quietly leaning on the broken behaviour, and when it does,
+those failures are findings rather than regressions. The instinct to treat a new red test as damage
+caused by the fix is exactly backwards.
+
+---
+
+## [Day 5] The report generated its own numbers and hard-coded its own conclusions
+
+**Symptom:** `formatFindings` printed that Platt scaling produced "a −11.0% reduction" in regret while
+the table directly above it showed regret going *up*. A second finding asserted that calibration "did
+NOT transfer" to the held-out split, on a run where it plainly had.
+
+**First hypothesis:** A sign error in the percentage arithmetic.
+
+**Root cause:** Worse than a sign error, and more embarrassing given what the function is for. The
+magnitudes were computed from the run; the *verdicts* were English I had written by hand while looking
+at one particular run's output. So the numbers moved when the data moved and the conclusions did not.
+`formatFindings` exists specifically to stop a report drifting away from its data, and I had
+reintroduced the identical failure one level up, inside the tool built to prevent it. A second,
+quieter version of the same thing: the "best model" was selected by Brier while the finding text
+discussed money.
+
+**Fix:** Every verdict is now derived from the sign of the quantity it describes — `beatLookup`,
+`brierHelped && eceHelped`, and so on — with the finding numbering itself computed, so a finding that
+does not apply is not printed rather than printed with the wrong tense. The report now computes *two*
+winners, `bestBrier` and `bestMoney`, and says so when they differ. And the arm chosen for Platt
+scaling is now selected by VALID regret rather than VALID Brier, because regret is what selects the
+model we ship — previously finding 4 tested calibration on `gbm` while finding 3 concluded we ship
+`logistic`. Selection still never looks at TEST.
+
+**Lesson:** Generated numbers with hand-written conclusions is a worse pattern than a fully
+hand-written report, because it looks automated and audits like automation while the load-bearing
+claim is still a stale sentence. If a value is computed, the verdict about that value has to be
+computed from it too. The tell to watch for is any sentence in a generated report containing a word
+like "improved," "did not," or "reduction" that is not sitting inside a branch.
+
+---
+
+## [Day 5] The model that won the leaderboard lost ₹1.5 lakh
+
+**Symptom:** Not a bug — the day's headline result, and the reason the whole five-arm comparison was
+worth building. On held-out TEST, the GBM wins on every standard metric and loses badly on money:
+
+| arm | Brier | AUC | ECE | value captured | regret |
+|---|---|---|---|---|---|
+| constant | 0.09283 | 0.5000 | 0.02389 | 50.5% | ₹25,41,107 |
+| lookup (GROUP BY) | 0.08797 | 0.7027 | 0.01905 | 94.0% | ₹3,07,099 |
+| **logistic** | 0.08518 | 0.7502 | 0.01419 | **96.3%** | **₹1,90,825** |
+| gbm | **0.08464** | **0.7539** | **0.01371** | 93.4% | ₹3,40,927 |
+| oracle | 0.07218 | 0.8759 | 0.01388 | 96.8% | ₹1,66,027 |
+
+GBM is better at predicting and ₹1,50,102 worse at deciding.
+
+**First hypothesis:** A bug in the regret calculation. This is the reading I wanted, because the
+alternative meant the metric I had spent the day building the pipeline around was the wrong metric.
+
+**Root cause:** Both numbers are correct, and they are measuring different things. Brier, log loss,
+AUC and ECE are computed over all 19,800 rows *pooled*. But an action is never selected by comparing
+one case to another — it is selected by ranking the ~33 candidate actions *within a single case* and
+taking the argmax expected value. Pooled metrics are structurally blind to within-case ordering. A
+model can be better on average across the whole population and worse at the only comparison that
+actually spends money. GBM picks the best available action on 58.8% of cases; logistic picks it on
+61.6%.
+
+**Fix:** No code fix — a decision. Day 6's engine is built on logistic, and arms are selected on
+regret rather than Brier. The oracle result makes the same point from the other end: it is 49.6 points
+better than GBM at *predicting* (82.2% of the learnable Brier gap captured, versus 32.6%) and only
+picks the best action 67.0% of the time versus 58.8%. Enormous gains in prediction quality buy modest
+gains in decision quality, because most cases have an obvious best action that a mediocre model also
+finds.
+
+**Lesson:** Measure the quantity you are going to act on. Had I stopped at the Brier table — which is
+where a model comparison normally stops — I would have shipped the GBM, reported a genuine 0.6%
+improvement in Brier, and lost 79% more money than necessary, with every metric on the slide
+supporting the decision. There is a convenient corollary I want to flag rather than lean on: the
+model that wins is also the auditable one, whose coefficients print as readable domain claims. That is
+a real advantage for a system that moves money, and it would have been a *bad* argument if the
+measurement had gone the other way. The argument has to run from the measurement to the choice, never
+back from the choice I would have preferred.
+
+---

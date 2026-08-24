@@ -25,8 +25,17 @@ import { join, relative, sep } from 'node:path';
 
 const SRC = new URL('../src/', import.meta.url).pathname;
 
-/** Directories whose code must never be able to see ground truth. */
-const RESTRICTED = ['agent', 'api', 'razorpay'];
+/**
+ * Directories whose code must never be able to see ground truth.
+ *
+ * `ml` joined this list on Day 5, before the feature extractor was written rather than after.
+ * That ordering was deliberate: a feature extractor is the single most tempting place in the
+ * project to reach for a latent variable, because `payerType` would make the model look
+ * extraordinary and the code would read completely innocently. The extractor's whole job is to
+ * decide what the model may know, so the constraint belongs in the test file first and the
+ * implementation second.
+ */
+const RESTRICTED = ['agent', 'api', 'razorpay', 'ml'];
 
 /** Tokens that indicate a read of simulator ground truth. */
 const FORBIDDEN_TOKENS = [

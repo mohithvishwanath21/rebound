@@ -22,13 +22,16 @@
 
 import { generateBatch } from '../../sim/generator.js';
 import { scoreDiagnosis, formatDiagnosisReport } from '../diagnosisAccuracy.js';
+import { evalNow } from '../evalClock.js';
 
 const args = process.argv.slice(2);
 const seed = args.find((a) => a.startsWith('--seed='))?.split('=')[1] ?? 'day4';
 const asJson = args.includes('--json');
 
 async function run(split) {
-  const { events, latents } = generateBatch({ seed, split });
+  // Pinned clock. Diagnosis never reads a timestamp, so this report was already reproducible —
+  // but by luck of what it happens to depend on rather than by design. Pinned anyway.
+  const { events, latents } = generateBatch({ seed, split, now: evalNow() });
   const report = await scoreDiagnosis({ events, latents });
   return { split, report };
 }

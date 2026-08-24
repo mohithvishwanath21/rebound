@@ -16,8 +16,9 @@
     "api": "node src/api/server.js",
     "eval": "node src/eval/cli/run.js",
     "test": "node --test test/*.test.js",
-    "check": "npm run test && npm run verify-sim && npm run diagnose-report",
-    "diagnose-report": "node src/eval/cli/diagnose-report.js"
+    "check": "npm run test && npm run verify-sim && npm run diagnose-report && npm run model-report",
+    "diagnose-report": "node src/eval/cli/diagnose-report.js",
+    "model-report": "node src/eval/cli/model-report.js"
   },
   "comments": {
     "dependencies": [

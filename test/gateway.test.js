@@ -389,13 +389,24 @@ test('[SIM] a settling disputer is credited the haircut, not the invoice', async
     maxWillingToPayPaise: 25000,
     responsiveness: 1,
   };
-  const gw = createSimGateway({ getLatent: () => disputing, seed: 3, now: () => NOW });
-
-  let sawCapture = false;
-  for (let seq = 1; seq <= 60; seq++) {
-    const r = await gw.sendPaymentLink(requestFor({ decisionSeq: seq, amountPaise: 41000 }));
-    if (r.state === ReceiptState.CAPTURED) {
-      sawCapture = true;
+  // Swept across seeds rather than pinned to one, because the property under test is "whenever a
+  // dispute settles, it settles at the haircut" — and a disputing payer settles rarely, so a single
+  // seed only demonstrates that property if it happens to get lucky.
+  //
+  // The original version used `seed: 3` and 60 draws, with its own assertion message admitting the
+  // risk: "otherwise this proves nothing." It passed for weeks, then broke the moment `deriveSeed`
+  // was fixed to actually respect its seed — not because the simulator changed, but because the
+  // stream did. A test that depends on a lucky draw is a test that will fail for an unrelated reason
+  // at an inconvenient moment, and it did.
+  let captures = 0;
+  let attempts = 0;
+  for (let seed = 1; seed <= 12; seed++) {
+    const gw = createSimGateway({ getLatent: () => disputing, seed, now: () => NOW });
+    for (let seq = 1; seq <= 60; seq++) {
+      attempts += 1;
+      const r = await gw.sendPaymentLink(requestFor({ decisionSeq: seq, amountPaise: 41000 }));
+      if (r.state !== ReceiptState.CAPTURED) continue;
+      captures += 1;
       assert.ok(
         r.amountCollectedPaise <= 25000,
         `credited ${r.amountCollectedPaise} but the payer would only ever pay 25000`
@@ -403,7 +414,7 @@ test('[SIM] a settling disputer is credited the haircut, not the invoice', async
       assert.ok(r.amountCollectedPaise < r.amountPaise, 'a haircut must show as collected < requested');
     }
   }
-  assert.ok(sawCapture, 'expected at least one capture across 60 draws — otherwise this proves nothing');
+  assert.ok(captures > 0, `expected at least one settlement across ${attempts} draws, saw none`);
 });
 
 test('[SIM] refuses to run without a latent record rather than inventing one', async () => {
