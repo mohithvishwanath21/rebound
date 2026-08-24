@@ -14,10 +14,12 @@ Requires Node 22 or newer (`node --version`).
 
     npm run check
 
-Runs the test suite, the simulator self-check, the diagnosis report and the model report in sequence.
-Takes about 40 seconds. If this passes, everything below passes.
+Runs the test suite, the simulator self-check, the diagnosis report, the model report and the batch
+decision report in sequence. Under a minute — 23 s on the machine it was last measured on, and it was
+~40 s on the reference Windows box before the decision report was added, so expect that range. If this
+passes, everything below passes.
 
-Verify the four commands it runs, rather than trusting the label:
+Verify the five commands it runs, rather than trusting the label:
 
     npm pkg get scripts.check
 
@@ -27,7 +29,8 @@ Verify the four commands it runs, rather than trusting the label:
 
     npm test
 
-Expect `# pass 269`, `# fail 0`. Roughly 5 seconds.
+Expect `# pass 397`, `# fail 0`, `# todo 3`. Roughly 7 seconds. The three `todo` entries are a
+deliberately pinned defect, not unfinished work — see section 8.
 
 The tests are in three deliberately separate categories, and the distinction matters more than the
 count:
@@ -45,6 +48,15 @@ Run one file at a time if you want to read the names:
     node --test test/ml.test.js
     node --test test/rng.test.js
     node --test test/boundary.test.js
+    node --test test/guardrails.test.js
+    node --test test/expectedValue.test.js
+    node --test test/decide.test.js
+    node --test test/retryTiming.test.js
+
+The Day 6 files are worth reading for the names alone. Several are regression pins whose titles state
+the bug: "the approval queue and the escalation queue are separate, and their totals reconcile", "a
+revoked mandate is refused, not priced", "an unprofitable deferred action does not buy a WAIT — and the
+stop still knows its evidence".
 
 ---
 
@@ -207,7 +219,88 @@ denominator, and one of those tests caught my own addition error rather than a c
 
 ---
 
-## 7. Diagnosis accuracy
+## 7. The decision engine — what it decided, and why, for a whole batch
+
+    npm run decide-report
+
+This is the Day 6 deliverable and the closest thing in the repo to the product. It fits the recovery
+model on TRAIN, decides all 200 cases at a fixed instant, and prints the outcome mix, the stop
+reasons, both human queues, and a full audit trail for one case.
+
+Read the two share columns against each other first:
+
+    outcome             cases   share       at risk   share   exp. recovery
+    ACT                   152   76.0%      ₹3,43,977  16.5%        ₹37,751
+    AWAIT_APPROVAL         34   17.0%     ₹15,50,661  74.4%      ₹1,83,053
+    ESCALATE_HUMAN         12    6.0%      ₹1,87,933   9.0%             ₹0
+    STOP_PERMANENT          2    1.0%           ₹268   0.0%             ₹0
+
+They disagree on purpose. 76% of *cases* are acted on automatically and they carry 16.5% of the
+*money*; the 17% held for approval carry 74.4%. A recovery agent that treated cases as
+interchangeable would show these columns tracking each other. Value, not count, is the entire thesis.
+
+**The column most worth attacking.** `exp. recovery` is the agent's own arithmetic — the sum of the
+expected values of the actions it chose. It is not money, and it is not a measurement. It is what the
+policy *believes*, and it is printed next to a sentence saying so. Measured recovery against baselines
+belongs to Days 8-9.
+
+**Three things to check that would each falsify a claim this project makes.**
+
+`--explain=5` prints five full audit trails. Every non-chosen action carries a `rejectedBecause`; a
+forbidden action shows `priced: false, evPaise: null` rather than a number, because pricing an action
+you may not take invites someone to override the guardrail on the strength of its EV. Every chosen
+action satisfies `evPaise === grossPaise − totalCostPaise` exactly, in integer paise.
+
+    npm run decide-report -- --split=TEST
+    npm run decide-report -- --seed other-seed
+
+The model is always fitted on TRAIN, even when deciding TEST. Fitting on the split being decided would
+make every cell well-supported and the support asymmetry structurally impossible to observe.
+
+    npm run decide-report -- --json --quiet | node -e "..."
+
+Machine-readable, exit 0, nothing on stderr. `--quiet` suppresses progress so the JSON is parseable.
+
+**A limitation the report prints about itself.** The support asymmetry — the rule that a low
+probability may close a case when it rests on observations but must escalate when it rests on a
+base-rate fallback — almost never fires on this generator. At the shipped key `(cause, action)` there
+are 66 cells and every one is dense: 0.0% unseen, 0.0% fallback. The report says this rather than
+implying a demonstration it cannot give, and prints a measured diagnostic beside it: at a granularity
+a real merchant would have (`cause | action | matchTier | touchesUsed`, 408 cells) held-out rows are
+0.3% unseen and 4.3% fallback. The mechanism is carried by `test/recoveryModel.test.js`, not by this
+batch.
+
+**Reproducibility.** `DEFAULT_NOW` is fixed at `2026-08-24T09:30:00Z`. Using `new Date()` would make
+quiet hours, case age and retry gaps irreproducible — the same command would give different answers
+before and after 21:00 IST. Pass `--now` to move it deliberately.
+
+---
+
+## 8. The three failing tests you are supposed to see
+
+    npm test
+
+Expect **400 tests, 397 pass, 0 fail, 3 todo**. The three `todo` entries in
+`test/retryTiming.test.js` are not incomplete work that was forgotten; they are a defect found on
+Day 6, pinned deliberately, and left visible:
+
+    node src/eval/cli/probe-timing.js
+
+The simulator's `recoveryProbability` never reads `action.scheduledFor`. It computes the salary-window
+timing boost from `now` — the decision instant — which is identical for every candidate being compared
+against each other. For a cash-flow-constrained payer whose salary lands in two days, all three
+scheduled offsets are labelled `p = 0.032094`; honouring the instant the retry actually lands gives
+0.031 / **0.801** / 0.244. A 25× effect, invisible to the ground truth, on the decision this product is
+most distinctive about.
+
+The tests are `todo` rather than passing assertions of current behaviour, because a green test saying
+timing does not matter would eventually be read as a specification. They are `todo` rather than
+failing, because a red suite trains you to ignore red. Full write-up, including why fixing the
+simulator alone would make things *worse*, is the last Day 6 entry in `ENGINEERING_LOG.md`.
+
+---
+
+## 9. Diagnosis accuracy
 
     npm run diagnose-report
 
@@ -218,7 +311,7 @@ a rule table that never says "I don't know" looks identical to one that is alway
 
 ---
 
-## 8. The simulator's assumptions, stated
+## 10. The simulator's assumptions, stated
 
     npm run describe-sim
     npm run verify-sim
@@ -229,7 +322,7 @@ measurements, and the honest version of this project prints them rather than bur
 
 ---
 
-## 9. What is proven versus what is measured
+## 11. What is proven versus what is measured
 
 Two claims, never mixed, and the difference is the whole argument:
 
@@ -247,7 +340,7 @@ No command in this repo produces a number that mixes the two.
 
 ---
 
-## 10. Git history
+## 12. Git history
 
     git log --oneline
     git show --stat HEAD

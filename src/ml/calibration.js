@@ -435,6 +435,37 @@ export function fitLookupTable(rows, { key = (r) => `${r.actionKind}` , minCount
     /** Cells with enough support to use their own rate, as opposed to cells that exist but collapsed. */
     supportedGroups: supported.size,
     coverageOf,
+
+    /**
+     * SUPPORT FOR ONE ROW, WHICH IS THE FORM THE DECISION ENGINE NEEDS.
+     *
+     * `coverageOf` answers "what fraction of this batch was served by a fallback", which is the
+     * right question for a report and the wrong one for a decision. A stopping rule acts on one
+     * case at a time and has to know whether THIS estimate is backed by observations, because
+     * "I have seen 400 expired-card retries and 11% recovered" and "I have never seen this
+     * combination and 11% is the average of everything" are the same float and opposite
+     * situations. Only the first may close a case permanently.
+     *
+     * Note what the states are a property OF: the training data, not the model. The number of rows
+     * behind a cell is a fact about what we observed, which is why it travels with the estimate
+     * rather than being inferred from it downstream — nothing downstream could recover it.
+     *
+     * Returns `{ state, rows }` where state is:
+     *   SUPPORTED — the cell has at least `minCount` observations and its own rate was used
+     *   THIN      — the cell exists but collapsed to the global rate
+     *   UNSEEN    — the cell was absent from the fit data entirely
+     */
+    supportFor: (r) => {
+      const k = key(r);
+      const g = groups.get(k);
+      if (!g) return { state: 'UNSEEN', rows: 0, key: k };
+      if (!supported.has(k)) return { state: 'THIN', rows: g.n, key: k };
+      return { state: 'SUPPORTED', rows: g.n, key: k };
+    },
+
+    /** Observations behind a row's cell. Zero for an unseen cell, which is the honest answer. */
+    rowsBehind: (r) => groups.get(key(r))?.n ?? 0,
+
     /** Takes a ROW, not a feature vector — the grouping is over semantic fields, not features. */
     predictRow: (r) => table.get(key(r)) ?? globalRate,
   };

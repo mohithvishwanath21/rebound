@@ -1386,3 +1386,238 @@ estimate turn out to be the easy part is inconvenient for the story I was going 
 right about where the difficulty actually lives.
 
 ---
+
+## [Day 6] The same bug three times: a filter that quietly included the do-nothing actions
+
+**Found by:** writing hand-computed tests for the stopping rules and being unable to construct a case
+that produced `NO_PERMITTED_ACTION`.
+
+Three stop codes — `NO_PERMITTED_ACTION`, `BUDGET_EXHAUSTED`, `TOO_OLD` — were unreachable. So was the
+`NEGATIVE_EV` blocked branch. The cause was one line in each place: a filter over scored candidates
+that did not exclude the actions which collect no money. `NO_ACTION_YET`, `STOP_PERMANENT` and
+`ESCALATE_HUMAN` are always available and always priced, so "are there any actions left?" was always
+answered yes, and every branch downstream of "no, there are none" was dead code that no test had ever
+entered.
+
+The fix is `RECOVERING_KINDS`, and the reason it needs a comment rather than just a name is that the
+mistake is conceptually seductive:
+
+> the probability that justifies a STOP is not the probability of the action we are about to take
+> (there isn't one), it is the probability of the best action we are declining to take.
+
+Four instances of one mistake in one day. What they share is a set-membership question asked about the
+wrong set — "all candidates" when the intended set was "candidates that could recover money." I have
+started treating any `.filter()` over candidates as a place to state which set is meant and why, since
+the failure is silent by construction: the code runs, produces a decision, and simply never reaches
+the branch that would have disagreed.
+
+**Lesson.** Unreachable code does not announce itself in a passing suite; it announces itself when you
+try to write the test that reaches it and cannot. That is an argument for writing the hand-computed
+test for every branch you believe exists, rather than for the branches that are convenient to reach.
+
+---
+
+## [Day 6] Three tests failed and the tests were wrong, which I nearly did not check
+
+**Found by:** `node --test test/decide.test.js`.
+
+I had asserted that the engine would choose `SEND_LINK:EMAIL`. It chose `REQUEST_REAUTH:EMAIL`. The
+instinct was to fix the source, and the reason I did not is that `enumerateCandidateActions` has a
+docblock saying it is *deliberately* generous — it offers a reauth request for an overdue invoice even
+though that reads as incoherent, because whether it works is a measurable question and suppressing it
+would answer that question by assertion. Ranking incoherent options down is the scorer's job.
+
+So the engine was right and my expectation was a habit. Two of the three tests now assert the action
+*class* (`CUSTOMER_CONTACTING.has(kind)`) rather than a specific signature, because what those tests
+care about is that a message was chosen, not which one — and pinning the alphabet where the meaning is
+"some customer contact" is how a test becomes a tripwire for harmless changes.
+
+I also added a test that did not exist: that the ordering among messages tracks the response model.
+Writing it exposed a bug in my own helper — I wrote `(action) => ...` where `scoreAction` receives a
+single object, so every kind fell through to the default, all probabilities went flat, and the
+alphabetical tiebreak picked the winner. The test passed for a reason that had nothing to do with what
+it claimed to check. A constant scorer defeats the entire point of a scorer-driven ranking, and it
+looks exactly like a working test.
+
+**Lesson.** When a test fails, the first question is which side is wrong, and the answer is in the
+source's stated intent rather than in my memory of it. The second lesson is narrower and sharper: a
+test whose fixture accidentally makes all inputs identical will pass, and it will pass for every
+future change too.
+
+---
+
+## [Day 6] `Platt a=1.0000 b=0.0000` — a calibration step that provably could not do anything
+
+**Found by:** reading my own report header, because the parameters were suspiciously round.
+
+The decide-report fitted Platt scaling on the same rows the lookup table's group means were computed
+from, and printed the identity transform. This is not a bug in `fitPlatt`. It is arithmetic: a GROUP BY
+predicts each cell's empirical mean, so in-sample it is *already* perfectly calibrated, the gradient of
+the log-loss is zero at `a=1, b=0`, and the optimiser correctly refuses to move. The calibrator did its
+job perfectly and the job was vacuous.
+
+What makes this worth an entry is that it would have shipped. The report said "+ Platt", the numbers
+were plausible, nothing crashed, and the stopping rules — which depend on the *calibrated level* of p,
+not on the ranking — would have been reading uncalibrated probabilities while the header asserted
+otherwise. The whole reason calibration sits at that seam is that stopping needs a level; a calibration
+step that cannot move is a stopping rule with no foundation, wearing a label that says it has one.
+
+The fix is `splitByEvent(rows, { fraction: 0.8 })` — split on **eventId**, never on rows, because all
+33 rows for one event share a diagnosis, an amount and a latent payer, so a random row split puts
+near-duplicates on both sides and the held-out set is held out in name only. Fitted properly:
+`a=0.7364, b=-0.5789`. And a `plattIsIdentity` flag now prints `!! exactly the identity — the
+calibrator saw in-sample rows and could not move`, because I would rather the next occurrence be loud
+than rediscovered.
+
+**Lesson.** Round numbers from an optimiser are a symptom. More generally: when a component's output
+is suspiciously perfect, check whether it was asked a question it could not fail.
+
+---
+
+## [Day 6] A queue whose total contradicted its own summary table
+
+**Found by:** comparing two numbers in my own report output — the human queue said ₹17,38,594 and the
+`AWAIT_APPROVAL` bucket it was supposedly listing said ₹15,50,661.
+
+`summariseBatch` filtered the approval queue on `AWAIT_APPROVAL || ESCALATE_HUMAN`. The second number
+was correct; the queue was two different things concatenated. It also printed, as an approval reason,
+the string "INVOICE_DISPUTED is a human-only cause" — which is not something a reviewer can approve.
+
+The repair is conceptual rather than a filter change. These are two queues with two different jobs:
+
+- **`AWAIT_APPROVAL`** — an action is already chosen, priced, and has an idempotency key minted. The
+  reviewer answers yes or no in thirty seconds and the key does not change on approval.
+- **`ESCALATE_HUMAN`** — there is no proposed action. A person owns the case and has to decide what to
+  do. Unbounded work, different SLA.
+
+Merging them produces a number that is useless for staffing either activity. The regression pin asserts
+each queue's exposure equals its own outcome bucket, so the two can never drift apart again, and the
+report prints both plus a clearly-labelled combined total.
+
+**Lesson.** The bug was visible in the output the whole time; I found it by reading two numbers against
+each other rather than by testing. That is an argument for reports that print totals which *must*
+reconcile — a summary that cannot contradict itself also cannot warn you.
+
+---
+
+## [Day 6] The support table printed `NOT_APPLICABLE` for the entire batch
+
+**Found by:** the report's own output being obviously wrong.
+
+Two causes stacked. The audit record flattens `support` to a string for the trail, and I was reading it
+as an object. Then, having fixed that, the table still read `NONE` for escalated cases — because I was
+reading the *chosen* action's support, and an escalated case's chosen action is `ESCALATE_HUMAN`, which
+by design has no probability and therefore no support. Fixed to read the best priced *recovering*
+candidate: the support that matters is the support behind the estimate the decision actually rested on.
+
+This is the do-nothing-action bug family again, in its fifth appearance and in a different disguise —
+a question asked about `chosen` when the intended subject was "the best action that could have
+recovered money."
+
+**A related dishonesty, in my own prose rather than my code.** The report told the reader that
+`--split=TEST` would show the fallback rate the stopping rules cope with. It does not: TEST is 96.5%
+`SUPPORTED` with zero unseen cells, because `TEST_PARAM_SHIFT` perturbs the payer mix but introduces no
+new cause and no new action, so the *set* of cells is identical either side of it. I had written a
+verification instruction that would have produced a reassuring number and taught the reader the
+opposite of the truth.
+
+Replaced with a stated limitation and a measured diagnostic. At the shipped key granularity
+`(cause, action)` there are 66 cells, 0.0% unseen, 0.0% fallback. At a granularity a real merchant
+would have — `cause | action | matchTier | touchesUsed`, 408 cells — held-out rows are 0.3% unseen and
+4.3% fallback. So the support asymmetry rests on its unit tests plus that 4.3% estimate, and the report
+now says so instead of implying a batch demonstration it cannot give.
+
+**Lesson.** A verification instruction that has never been run is an unverified claim with extra
+authority, because the reader assumes someone followed it.
+
+---
+
+## [Day 6] The boundary test failed the CLI I had just finished, and the exemption I wanted was wrong
+
+**Found by:** `test/boundary.test.js`, which asserts that `src/agent/**` never imports `src/sim/**`.
+
+I had written the report CLI at `src/agent/cli/decide-report.js`. It has to generate a batch, so it
+imports the simulator, so it broke the rule that keeps the agent unable to see ground truth.
+
+The tempting fix was a one-line exemption — it is only a CLI, it only *reports*, it will never run in
+production. Every clause of that is true and it is still wrong: the rule's value is that it is
+unconditional. Grant it once for an honest reason and the next import has a precedent to point at, and
+the precedent will be cited by someone who does not know why the boundary exists. Moving the file to
+`src/eval/cli/` cost four minutes.
+
+**Lesson.** When a structural rule blocks you, the question is whether the rule is wrong or the code is
+in the wrong place. It was the second one, and the rule earned its keep by being annoying at exactly
+the right moment.
+
+---
+
+## [Day 6] The finding that matters most: the simulator never reads the time a retry was scheduled for
+
+**Found by:** an audit trail that looked fine. Case `evt_000001` ranked seven `RETRY_SCHEDULED`
+candidates spanning six hours to seven days out, and every one of them scored **₹41** — an exact tie in
+paise, resolved by the alphabetical tiebreak. Nothing was red. A tie that wide across a whole day of
+candidate slots is not a coincidence.
+
+`recoveryProbability` never reads `action.scheduledFor`. The funds-timing branch computes the
+salary-window boost from `now` — the instant of the **decision** — which is by definition identical for
+every candidate being compared against each other. So the simulator is structurally incapable of
+preferring one slot to another.
+
+Its own documentation says otherwise, in three places. `salaryWindowBoost` is described as "the largest
+single timing effect in the model" and as "the mechanism that rewards RETRY_SCHEDULED over RETRY_NOW."
+The funds branch says its decay is "what makes *which* scheduled slot the agent picks matter, not
+merely that it scheduled at all." And `dataset.js` offers three scheduled offsets specifically so that
+"the timing effect" is learnable. All three comments describe a mechanism the code does not implement.
+
+**Measured, for a `TEMPORARILY_SHORT` payer whose salary lands in two days:**
+
+| scheduled slot | as the dataset labels it today | if the scheduled instant were honoured |
+|---|---|---|
+| +6h — before the credit | 0.032094 | 0.031146 |
+| +3d — just after the credit | 0.032094 | **0.800953** |
+| +9d — window has decayed | 0.032094 | 0.244365 |
+
+A 25× difference in recovery probability, on the decision the product is most distinctive about,
+invisible to the ground truth every number in this repo has been measured against. Reproduce with
+`node src/eval/cli/probe-timing.js`.
+
+**Three defects, not one, and the order matters.**
+
+1. **The simulator cannot express the effect.** `preFundsPenalty` (0.06) is levied on every scheduled
+   retry including ones deliberately timed to land *after* the money arrives — the penalty for charging
+   an empty account applied to a retry chosen to avoid it. That single line is why scheduling is worth
+   nothing here.
+2. **The shipped model key cannot learn it.** The lookup table groups on `(diagnosedCause, actionKind)`
+   and all seven offsets share a kind. Fixing only the simulator would be *worse than today*: the
+   engine would keep choosing timing by tiebreak against a ground truth that had started caring, so
+   the loss would become real money instead of a wash.
+3. **The engine's answer to "when?" is currently a string sort.** With probabilities flat, all seven
+   candidates tie and the deterministic tiebreak decides. It picks the soonest slot — but only because
+   `actionSignature` embeds an ISO-8601 UTC instant and ISO-8601 in UTC happens to sort
+   lexicographically in chronological order. "Act as soon as permitted" is a defensible policy; it is
+   not defensible to arrive at it by accident and describe it as a decision.
+
+**A consequence for Days 8-9 that would have been invisible.** The sensitivity sweep varies
+`salaryWindowBoost` over [1.6, 3.2]. If no candidate's probability moves with it, the sweep reports
+"robust to this assumption" for the sole reason that the assumption cannot act. `recoveryProbability`
+already refuses to default its assumption set precisely to prevent a sweep from reporting robustness it
+never measured — the same file guards one route to a meaningless sweep and contains another.
+
+**Pinned before fixed.** `test/retryTiming.test.js` — three `node:test` `todo` tests asserting the
+behaviour the simulator documents and lacks, plus four passing tests pinning what must survive the fix
+(a structural zero stays zero however cleverly it is scheduled; the boost cannot push p above 1; the
+tiebreak's meaning; the model key's blindness). `todo` rather than a passing test of current behaviour,
+because a green test asserting that timing does not matter would eventually be read as a
+specification — and `todo` rather than a failing test, because a red suite trains you to ignore red.
+Suite: 400 tests, 397 pass, 0 fail, 3 todo.
+
+**Lesson.** Every one of the seven defects this day produced was found by reading output, not by
+running tests — and this one was found in output that contained no error at all, just seven identical
+numbers where seven different numbers were the entire point. A green suite means the code does what the
+tests say. It says nothing about whether the tests, or the ground truth underneath them, describe the
+problem. The most expensive errors in this project so far have all lived in the gap between a comment
+asserting a mechanism and code implementing one, and the only tool that has reliably found them is
+looking at the numbers and asking why they are that shape.
+
+---
+
