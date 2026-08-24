@@ -19,7 +19,7 @@
  * Then read the money table, which prices the same question in rupees, and then the TEST rows,
  * which are the only ones that count.
  *
- * Flags:
+ * Flags (all in --name=value form; the spaced form is a hard error, see cli/flags.js):
  *   --seed=day5     seed for the outcome draws and the fit/valid split
  *   --count=600     events per split
  *   --trees=300     boosting rounds
@@ -28,18 +28,22 @@
  */
 
 import { compareModels, formatModelReport } from '../modelComparison.js';
+import { readFlags, asNumber } from './flags.js';
 
-const args = process.argv.slice(2);
-const flag = (name, fallback) => {
-  const hit = args.find((a) => a.startsWith(`--${name}=`));
-  return hit ? hit.split('=')[1] : fallback;
-};
+const f = readFlags(
+  process.argv.slice(2),
+  { seed: 'day5', count: '600', trees: '300' },
+  ['json', 'quiet'],
+  (raw) => ({
+    ...raw,
+    count: asNumber(raw.count, 'count', { min: 20 }),
+    trees: asNumber(raw.trees, 'trees', { min: 1 }),
+  })
+);
 
-const seed = flag('seed', 'day5');
-const count = Number(flag('count', 600));
-const trees = Number(flag('trees', 300));
-const asJson = args.includes('--json');
-const quiet = args.includes('--quiet') || asJson;
+const { seed, count, trees } = f;
+const asJson = f.json;
+const quiet = f.quiet || asJson;
 
 const started = Date.now();
 const result = await compareModels({

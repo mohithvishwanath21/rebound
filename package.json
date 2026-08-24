@@ -18,9 +18,14 @@
     "test": "node --test test/*.test.js",
     "check": "npm run test && npm run verify-sim && npm run diagnose-report && npm run model-report",
     "diagnose-report": "node src/eval/cli/diagnose-report.js",
-    "model-report": "node src/eval/cli/model-report.js"
+    "model-report": "node src/eval/cli/model-report.js",
+    "select-arm": "node src/eval/cli/select-arm.js"
   },
   "comments": {
+    "scripts": [
+      "`select-arm` is deliberately NOT part of `check`. It runs a 20-world sweep and takes about 90 seconds, and `check` has to stay fast enough to run on every change. The plumbing and the statistics are covered by test/armSelection.test.js, which runs the same procedure on three tiny worlds in under two seconds; the full sweep is a deliberate act you perform when choosing which model the decision engine is built on, not a per-commit check.",
+      "`select-arm` is also the only command permitted to decide that choice. `model-report` scores the reserved held-out batch and is for final reporting only — reading an arm choice out of it is what went wrong on Day 5."
+    ],
     "dependencies": [
       "Deliberately short. `razorpay` was removed once the client was hand-rolled over fetch (see src/razorpay/httpClient.js for the reasoning), and `dotenv` once src/core/env.js replaced it.",
       "Everything that produces a number in this project — the seeder, the simulator, the eval, the whole test suite — runs on a clean clone with zero installed packages. The two remaining entries are only needed for the API server and the persisted audit trail."

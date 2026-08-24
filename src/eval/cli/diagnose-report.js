@@ -23,10 +23,11 @@
 import { generateBatch } from '../../sim/generator.js';
 import { scoreDiagnosis, formatDiagnosisReport } from '../diagnosisAccuracy.js';
 import { evalNow } from '../evalClock.js';
+import { readFlags } from './flags.js';
 
-const args = process.argv.slice(2);
-const seed = args.find((a) => a.startsWith('--seed='))?.split('=')[1] ?? 'day4';
-const asJson = args.includes('--json');
+const f = readFlags(process.argv.slice(2), { seed: 'day4' }, ['json']);
+const seed = f.seed;
+const asJson = f.json;
 
 async function run(split) {
   // Pinned clock. Diagnosis never reads a timestamp, so this report was already reproducible —

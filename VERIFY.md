@@ -27,7 +27,7 @@ Verify the four commands it runs, rather than trusting the label:
 
     npm test
 
-Expect `# pass 248`, `# fail 0`. Roughly 3 seconds.
+Expect `# pass 269`, `# fail 0`. Roughly 5 seconds.
 
 The tests are in three deliberately separate categories, and the distinction matters more than the
 count:
@@ -94,8 +94,16 @@ days:
 Different numbers, in every column. If they were identical, the seed would be decorative — see the
 Day 5 entry "Four days of 'different seeds' were all the same seed."
 
-Note the `=`. `--seed day6` with a space is currently ignored and silently falls back to `day5`,
-which is the same silent-fallback pattern as the bug above and is logged as a gap.
+Note the `=`. `--seed day6` written with a space **now exits 2 with a message naming the correct
+form.** It used to be accepted silently, fall back to `day5`, and then print `seed day6` in its own
+header — a report labelled with data it had not used. That was the third instance of one failure mode
+in this project, so the parser was rewritten to refuse rather than guess: unknown flags, spaced flags
+and values on switches are all fatal. Verify the guard is live:
+
+    node src/eval/cli/model-report.js --seed day6      # exits 2, names --seed=VALUE
+    node src/eval/cli/model-report.js --tress=500      # exits 2, "Did you mean --trees?"
+
+Both should print one clean line, not a stack trace.
 
 ---
 
@@ -124,6 +132,12 @@ any honest arm and the *worst* regret. Brier and AUC are pooled over all rows; a
 ranking candidates within a single case. A pooled metric cannot see within-case ordering, and only
 within-case ordering spends money.
 
+> **Read that ₹1,50,102 as one draw.** The 20-world sweep in section 6 does not reproduce it: averaged
+> over many worlds, `logistic` wins *both* Brier and regret, and the regret gap to `gbm` is 0.31% ±
+> 0.32% — indistinguishable from zero. So the mechanism above is real and worth understanding, but the
+> magnitude on this seed is mostly noise, and the original write-up leaned on it too hard. The general
+> claim that survives is the mechanism, not the rupee figure.
+
 **The coefficient table.** Fifteen lines of log-odds with support counts. This is the audit surface —
 each line is a falsifiable claim about the world that a reviewer can disagree with without reading
 code. It is also the reason a linear model is in the running at all.
@@ -134,7 +148,66 @@ numbers and hard-coded its own conclusions" for the version where it did not.
 
 ---
 
-## 6. Diagnosis accuracy
+## 6. The arm selection sweep — the honesty check on how the model was chosen
+
+    npm run select-arm
+
+About 90 seconds. Twenty independently generated worlds, and it is the only command allowed to decide
+which model the Day 6 decision engine is built on.
+
+**Why it exists.** The Day 5 report picked an arm by reading the held-out TEST batch. That is
+selection on the test set, and it silently converts a held-out number into a fitted one. The report
+also contradicted itself: one finding concluded `logistic` from TEST while another used `lookup` from
+VALID. Neither the choice nor the disagreement was legitimate.
+
+**Why "just use VALID" was not the fix.** VALID is 120 events, and on it four arms sit within ₹1,650
+of each other. A single split that small cannot separate them; it will name a winner anyway, which is
+worse than admitting it cannot.
+
+**What it does instead.** Each world is split 64% fit / 16% tune / 20% select. The tune split exists
+so `gbm`'s early stopping has somewhere to look that is not the scoring set — otherwise it would be
+consulting data the other three arms had not seen. Regret is normalised per world as
+`regret / best-available`, because absolute rupees are not comparable across worlds of different total
+value. Every comparison is **paired within a world**: between-world regret ranges from under 1% to
+about 15%, and that spread is shared by all arms, so a difference of means would mostly measure which
+worlds got drawn.
+
+**What to check in the output.**
+
+The line reading `SELECTED: logistic — BY TIEBREAK, NOT BY MEASUREMENT`. That wording is the point.
+Three arms — `logistic`, `gbm`, `lookup` — cannot be separated at the pre-declared |t| ≥ 2.0 bar, so
+the choice fell to a preference order written into `src/eval/armSelection.js` before the sweep was
+first run. A preference is labelled as a preference and never as a finding.
+
+The `logistic vs lookup` row: **−0.32% ± 0.29%, t = −1.09, and lookup wins 11 worlds to 8.** The mean
+and the sign count point opposite ways, which means the mean is being carried by a few worlds. Both
+are printed for exactly that reason. Read together they say the ML layer does **not** measurably beat
+a GROUP BY on this generator — the opposite of what the Day 5 write-up claimed.
+
+The coverage block: `0.00% of scored rows on a fallback` on both scoring sets, 66 of 66 cells
+populated. That number falsified my own explanation for the contradiction. I had predicted the GROUP
+BY degrades under distribution shift because its stored cells go stale; the shift moves payer mix,
+error-text vagueness and amounts, but adds no new cause and no new action, so the cell *set* is
+identical either side and there is no coverage to lose. More worlds would not have helped — the
+hypothesis was wrong, not underpowered.
+
+**Verify it cannot cheat.** The reserved batch is `seed: 'day4'`, and the sweep has no expression that
+could produce it:
+
+    node --test test/armSelection.test.js
+
+Twenty-one tests. The structural one scans the source and fails if `armSelection.js` references the
+reserved seed in executable code or passes an un-prefixed seed to the generator — the same static
+approach as the ground-truth boundary in section 3, and for the same reason: a behavioural test only
+covers the paths someone thought to exercise. It ships with a negative control that proves the
+detector can fail.
+
+Every statistic in the file is checked against arithmetic done on paper, including the `n − 1`
+denominator, and one of those tests caught my own addition error rather than a code defect.
+
+---
+
+## 7. Diagnosis accuracy
 
     npm run diagnose-report
 
@@ -145,7 +218,7 @@ a rule table that never says "I don't know" looks identical to one that is alway
 
 ---
 
-## 7. The simulator's assumptions, stated
+## 8. The simulator's assumptions, stated
 
     npm run describe-sim
     npm run verify-sim
@@ -156,7 +229,7 @@ measurements, and the honest version of this project prints them rather than bur
 
 ---
 
-## 8. What is proven versus what is measured
+## 9. What is proven versus what is measured
 
 Two claims, never mixed, and the difference is the whole argument:
 
@@ -174,7 +247,7 @@ No command in this repo produces a number that mixes the two.
 
 ---
 
-## 9. Git history
+## 10. Git history
 
     git log --oneline
     git show --stat HEAD

@@ -1240,3 +1240,149 @@ reason, appear to disprove that guarantee. Splitting the file-reading assertions
 boundary-enforcement assertions would have made the failure legible immediately.
 
 ---
+
+## Day 5, addendum — I picked the model by reading the held-out test set
+
+**Found by:** reviewing my own Day 5 report before starting Day 6, because two of its findings named
+different arms and I wanted to know which one Day 6 was supposed to use.
+
+**The symptom.** Finding 3 concluded that `logistic` was "the arm to build the decision engine on," and
+added that "the argument runs from the measurement, not from the preference." Finding 4 recalibrated
+`lookup`. The report recommended two different models in two adjacent paragraphs and did not notice.
+
+**The actual defect, which is worse than the inconsistency.** Finding 3 read its conclusion off the
+TEST column. TEST is the batch reserved for final reporting. Choosing a component by looking at it
+converts a held-out number into a fitted one, and every subsequent figure quoted from that batch is
+then optimistic by an unknown amount. The sentence claiming the argument ran from measurement rather
+than preference made it worse: the reasoning after the peek was fine, and that is exactly what makes
+this kind of error easy to commit and hard to spot. Being careful downstream of an illegitimate look
+does not repair it.
+
+**Why the obvious fix was also wrong.** Select on VALID instead. VALID is 120 events, and on it four
+arms sit within ₹1,650 of one another. A split that small does not have the resolution to separate
+them — it will still name a winner, and that winner is a coin flip wearing a decimal point. Swapping
+one under-powered single split for another would have preserved the appearance of rigour while
+changing nothing.
+
+**The repair.** `src/eval/armSelection.js` and `npm run select-arm`. Twenty independently generated
+worlds; inside each, a 64/16/20 fit / tune / select division. The tune split exists so `gbm`'s early
+stopping has data to consult that is not the scoring set, since otherwise one arm gets to look at the
+selection data and three do not. Regret is normalised per world as `regret / best-available`, because
+raw rupees are not comparable across worlds whose total recoverable value differs by a factor of
+several. Every comparison is paired within a world: between-world regret runs from 0.9% to 15.0%, that
+spread is shared by every arm, and an unpaired comparison would mostly be measuring which worlds got
+drawn. The selection rule and the tiebreak preference order were written into the file's docblock
+before the sweep was first run, and the output records `selectedBy: 'measurement' | 'tiebreak'` so a
+preference can never be reported as a finding.
+
+The structural guarantee is that the file cannot generate the reserved batch at all. Not "does not" —
+`test/armSelection.test.js` scans the source and fails if the reserved seed appears in executable code
+or if any seed reaches the generator without a namespace prefix. Same reasoning as the ground-truth
+boundary check: make the wrong thing impossible rather than merely avoided, because avoidance depends
+on whoever edits the file next remembering why.
+
+### What the sweep found, including the parts that contradict Day 5
+
+| arm | mean norm. regret | sd | mean rank | worlds won | mean Brier |
+|---|---|---|---|---|---|
+| logistic | 3.52% | 3.16% | 1.90 | 7/20 | 0.09518 |
+| gbm | 3.83% | 3.44% | 2.35 | 5/20 | 0.09594 |
+| lookup | 3.85% | 3.15% | 1.75 | 8/20 | 0.09945 |
+| constant | 52.46% | 9.42% | 4.00 | 0/20 | 0.10511 |
+
+Paired: logistic − gbm = −0.31% ± 0.32%, t = −0.95, 14-6. logistic − lookup = −0.32% ± 0.29%,
+t = −1.09, **8-11**. gbm − lookup = −0.02%, t = −0.05, 7-13. All three against constant: t ≈ −19.
+
+**1. The selection is a tie, and is labelled one.** `logistic`, `gbm` and `lookup` are mutually
+inseparable at the pre-declared |t| ≥ 2.0 bar. `logistic` was chosen by the declared preference order,
+on the functional grounds that the Day 6 engine has to score candidate actions it holds few or no fit
+rows for. The output says `BY TIEBREAK, NOT BY MEASUREMENT`. That phrasing is the deliverable: a
+procedure that cannot separate two arms should say so rather than emit a confident ranking of noise.
+
+**2. Day 5's headline does not replicate.** I reported that `gbm` won Brier while losing ₹1,50,102 in
+regret. Across twenty worlds `logistic` wins *both* metrics and the regret gap to `gbm` is statistical
+noise. The ₹1,50,102 was substantially one seed. The *mechanism* I described is still true and still
+matters — Brier is pooled over all 19,800 rows while an action is chosen by ranking ~33 candidates
+within one case, so a pooled metric structurally cannot see the ordering that spends money — but I
+attached a general claim to a single draw and quoted the rupee figure as though it were an effect size.
+
+**3. The ML layer does not measurably beat a GROUP BY on this generator.** Day 5's finding 1 claimed a
+37.9% regret reduction against `lookup` on TEST and concluded "the model earns its place." Paired over
+twenty worlds the difference is −0.32% ± 0.29% and `lookup` wins more worlds than `logistic` does.
+This is the finding I least wanted and it is the one with the most evidence behind it.
+
+### The hypothesis I formed to explain that away, and how it died
+
+The contradiction had an appealing explanation with a real mechanism. The headline TEST batch applies
+`TEST_PARAM_SHIFT`; the sweep's select split does not. A GROUP BY stores an observed rate per
+(cause, action) cell, so when the population moves those cells go stale in a way more data cannot fix,
+whereas a parametric model interpolates. That would have made the ML layer's value *robustness under
+drift* — narrower than "more accurate," more useful, and the property that actually matters for
+recovery, where the cause mix drifts constantly.
+
+I added a shifted scoring world to test it. The regret difference moved the right way — logistic −
+lookup went from −0.32% (t = −1.09) in distribution to −1.14% (t = −1.68) under shift, and the win
+count flipped from 8-11 to 10-9 — and at that point the honest options were to stop or to add worlds
+until t crossed 2.0. Adding worlds until a number crosses a line is not a test.
+
+So I measured the mechanism instead. `fitLookupTable` now reports coverage: what fraction of scored
+rows landed on a cell with real support, versus on a thin cell collapsed to the base rate, versus on a
+cell never seen at all. **The fallback rate is exactly 0.00% on both sets across all twenty worlds, and
+66 of 66 cells clear `minCount`.** `TEST_PARAM_SHIFT` perturbs the payer mix, the rate of unmatchable
+error text and the amount distribution — it introduces no new cause and no new action, so the *set* of
+cells is identical either side of the shift. With every cell populated there is no coverage to lose.
+The hypothesis was wrong, not underpowered, and more worlds would never have revealed that; a
+2,000-world sweep would have produced a significant p-value for a mechanism that cannot operate here.
+
+A narrower version survives and this sweep cannot test it: every cell is populated, but under shift
+each one averages over a different internal mix, so a stored cell mean is stale rather than missing.
+Separating rate-staleness from coverage-loss needs a shift to the cause mix itself. That is a Day 8-9
+sensitivity job and it is now written down as one rather than assumed.
+
+**Lesson (statistical).** When a measured difference is not separable, the useful next move is to
+measure the proposed mechanism directly rather than to buy power. The mechanism measurement here is
+exact, has no standard error, cost one function, and returned a clean negative that no amount of
+additional sampling would have produced. Chasing significance on the downstream symptom would have
+taken twenty minutes of compute to arrive at a confident wrong answer.
+
+**Lesson (about myself).** I generated that hypothesis immediately after the sweep contradicted my
+earlier claim, and it happened to restore the conclusion I had already published in a more
+sophisticated form. It was well-reasoned, it had a mechanism, and it was false. The reason it got
+tested rather than written up is that the shifted set was already implemented as a comparison rather
+than as a defence — but I should record that the motivation was not neutral.
+
+### An unrelated defect the instrumentation exposed
+
+`lookup.predictRow` returns a number for every row, including rows whose cell it has never seen — the
+global base rate, indistinguishable by value from a well-supported estimate. For a scoring run that is
+a nuisance. For Day 6 it is a correctness problem: "recovery is unlikely" and "I have no data" call for
+different behaviour, and returning one float collapses them. The diagnosis layer already draws that
+distinction and abstains; the probability layer did not, and nothing noticed until something asked for
+coverage. Day 6's stopping rules have to read support, not just probability.
+
+On this generator the gap never fires, because the cells are dense. On real data, where rare causes
+meet rare instruments, it would fire constantly — so the instrumentation is not merely diagnostic, it
+is the thing that will matter first outside the simulator.
+
+### Corrections applied to earlier artefacts
+
+- `formatFindings` finding 3 no longer names an arm for Day 6; it reports the dissociation and defers
+  to `select-arm`. Finding 1 no longer says "the model earns its place" and now states that a single
+  split cannot separate arms, with the sweep result beside it.
+- `VERIFY.md` section 5 carries a correction on the ₹1,50,102 figure, and section 6 documents the
+  sweep. The stale note claiming `--seed day6` is silently ignored is gone — it now exits 2.
+- Commit `35d87f8`'s message quotes Platt parameters (a=1.1684, b=0.0407 on `gbm`) that the seed fix
+  invalidated; the current run gives a=0.9196, b=-0.3294 on `lookup`. A commit message cannot be
+  rewritten without rewriting history, so the correction lives here.
+
+**Where this leaves the project's central claim.** Weaker on one axis and clearer overall. I cannot say
+the ML layer beats a GROUP BY at estimating recovery probability on this simulator; on the evidence it
+does not. What the probability layer has to earn its place on instead is calibration under a
+value-weighted decision, the ability to score an action with few supporting rows, and an auditable
+coefficient table a reviewer can disagree with. Those are Day 6 properties, and none of them is
+measured by the table above. Track 3 asks for measured money recovered with compliant escalation,
+stopping rules and an audit trail — not for a model that wins a Brier contest. Having the probability
+estimate turn out to be the easy part is inconvenient for the story I was going to tell and probably
+right about where the difficulty actually lives.
+
+---

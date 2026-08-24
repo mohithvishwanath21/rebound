@@ -377,18 +377,64 @@ export function fitLookupTable(rows, { key = (r) => `${r.actionKind}` , minCount
 
   const globalRate = rows.reduce((s, r) => s + r.y, 0) / rows.length;
   const table = new Map();
+  const supported = new Set();
   for (const [k, g] of groups) {
     // Thin groups fall back to the global rate. Without this a group of three rows that all failed
     // predicts exactly 0.0, and an EV engine reading 0.0 will permanently stop a case on the
     // evidence of three observations.
-    table.set(k, g.n >= minCount ? g.positives / g.n : globalRate);
+    const ok = g.n >= minCount;
+    table.set(k, ok ? g.positives / g.n : globalRate);
+    if (ok) supported.add(k);
   }
+
+  /**
+   * WHY COVERAGE IS REPORTED AT ALL
+   * ------------------------------
+   * `predictRow` returns a number for every row, including rows whose cell it has never seen. Those
+   * two cases are indistinguishable from the outside: 31% backed by 47 observations and 31% meaning
+   * "no data, here is the base rate" come back as the same float.
+   *
+   * For a scoring run that is a nuisance. For Day 6 it is a correctness problem, because that is
+   * precisely the distinction a stopping rule should gate on — declining to act because the recovery
+   * probability is genuinely low is a decision, and declining because the table has nothing to say is
+   * an abstention, and they call for different behaviour. The diagnosis layer already separates those
+   * two (it abstains rather than guessing); the probability layer did not, and the asymmetry was
+   * invisible until something asked.
+   *
+   * It is also the direct measurement of why a GROUP BY degrades under distribution shift. The
+   * regret difference between lookup and a structured model is a downstream symptom with a large
+   * standard error; the fraction of rows served by a fallback is the mechanism, and it is exact.
+   *
+   * `fallback` counts rows served by the global rate for either reason. `unseen` counts the stricter
+   * subset whose key was absent from the fit data entirely.
+   */
+  const coverageOf = (scoreRows) => {
+    let unseen = 0;
+    let thin = 0;
+    for (const r of scoreRows) {
+      const k = key(r);
+      if (!table.has(k)) unseen += 1;
+      else if (!supported.has(k)) thin += 1;
+    }
+    const n = scoreRows.length;
+    return {
+      rows: n,
+      unseen,
+      thin,
+      fallback: unseen + thin,
+      fallbackRate: n > 0 ? (unseen + thin) / n : 0,
+      unseenRate: n > 0 ? unseen / n : 0,
+    };
+  };
 
   return {
     kind: 'lookup',
     table,
     globalRate,
     groups: table.size,
+    /** Cells with enough support to use their own rate, as opposed to cells that exist but collapsed. */
+    supportedGroups: supported.size,
+    coverageOf,
     /** Takes a ROW, not a feature vector — the grouping is over semantic fields, not features. */
     predictRow: (r) => table.get(key(r)) ?? globalRate,
   };

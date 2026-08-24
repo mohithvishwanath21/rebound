@@ -42,7 +42,7 @@
  * quietly corrupted, and it is invisible in the output when it happens.
  */
 
-import { generateBatch } from '../sim/generator.js';
+import { generateBatch, DEFAULT_PARAMS } from '../sim/generator.js';
 import { buildDataset, aleatoricFloor, oracleFeatures } from './dataset.js';
 import { evalNow } from './evalClock.js';
 import { fitLogistic, fitConstant, topCoefficients } from '../ml/logistic.js';
@@ -171,8 +171,26 @@ export async function compareModels({
   onProgress('generating batches');
   // `now` is PINNED. Left to its wall-clock default this report is not reproducible — see
   // src/eval/evalClock.js for the mechanism and for how the drift was found.
-  const trainBatch = generateBatch({ seed: 'day4', count, split: 'TRAIN', now: evalNow() });
-  const testBatch = generateBatch({ seed: 'day4', count, split: 'TEST', now: evalNow() });
+  //
+  // `overrides: { events }`, NOT `count`. For four days this read `generateBatch({ seed, count, ... })`
+  // and `generateBatch` has no `count` parameter, so the argument was silently dropped and every run
+  // produced exactly 600 events no matter what `--count` said. The header then printed the FLAG value
+  // as the event count, so `--count=200` would have produced a report claiming 200 events above
+  // numbers computed from 600. Found on Day 5 while building the selection sweep, by asking for 200
+  // and being told the split sizes for 600.
+  //
+  // Third instance of the same species as the seed bug and the spaced-flag bug: an input that appears
+  // to be honoured, is discarded, and leaves the output looking correct. The counts below now come
+  // from `batch.events.length` so the label cannot disagree with the data again.
+  const batchOverrides = {
+    events: count,
+    // Scaled with the batch, because events-per-customer is itself a parameter of the world: holding
+    // customers fixed while shrinking the event count would change the repeat-failure rate, which is
+    // something the features read.
+    customers: Math.max(2, Math.round((DEFAULT_PARAMS.customers * count) / DEFAULT_PARAMS.events)),
+  };
+  const trainBatch = generateBatch({ seed: 'day4', split: 'TRAIN', now: evalNow(), overrides: batchOverrides });
+  const testBatch = generateBatch({ seed: 'day4', split: 'TEST', now: evalNow(), overrides: batchOverrides });
 
   onProgress('building datasets');
   const trainSet = await buildDataset({ events: trainBatch.events, latents: trainBatch.latents, seed });
@@ -304,7 +322,12 @@ export async function compareModels({
   return {
     seed,
     counts: {
-      trainEvents: count, testEvents: count,
+      // From the generated data, not from the `count` argument. See the note beside `batchOverrides`:
+      // these two used to be `count`, which meant the report's header was an echo of the request
+      // rather than a description of the batch it scored.
+      trainEvents: trainBatch.events.length,
+      testEvents: testBatch.events.length,
+      requestedEvents: count,
       fitEvents, validEvents,
       fitRows: fit.length, validRows: valid.length, testRows: test.length,
       features: names.length,
@@ -519,8 +542,8 @@ export function formatFindings(result) {
     `a ${pct(Math.abs(regretDelta))} ${beatLookup ? 'reduction' : 'INCREASE'}.`);
   L.push('');
   if (beatLookup) {
-    L.push('   So the model earns its place, but the margin belongs in the regret column, not the');
-    L.push('   value-captured column: that denominator is dominated by easy cases every arm gets');
+    L.push('   So on this split the model is ahead, but the margin belongs in the regret column, not');
+    L.push('   the value-captured column: that denominator is dominated by easy cases every arm gets');
     L.push('   right, which is why both framings are reported and regret leads.');
   } else {
     L.push('   So on this split the GROUP BY wins, and that is the number that gets reported. A');
@@ -529,6 +552,15 @@ export function formatFindings(result) {
     L.push('   result is what they buy.');
   }
   L.push('   The lookup table is a strong baseline and deserves to be called one.');
+  L.push('');
+  L.push('   READ THAT NUMBER AS ONE DRAW, NOT AS AN EFFECT. It is a single split of a single');
+  L.push('   simulated world, so it has no standard error and cannot separate an ordering from noise.');
+  L.push('   An earlier version of this section called it "the model earns its place"; a 20-world');
+  L.push('   paired sweep (`npm run select-arm`) then found logistic, gbm and lookup mutually');
+  L.push('   indistinguishable, with lookup winning more worlds than logistic did. So the honest');
+  L.push('   version of finding 1 is that on this generator the GROUP BY is not measurably beaten, and');
+  L.push('   a single-split gap of any size is not evidence to the contrary. The sweep is the place');
+  L.push('   that question gets answered, because it is the only one with a denominator.');
   L.push('');
 
   // ------------------------------------------------------------------------------------------
@@ -578,9 +610,17 @@ export function formatFindings(result) {
     L.push('   the eleven candidate actions WITHIN a case — and only the within-case ordering selects');
     L.push('   an action. A pooled metric cannot see that, and it is the metric most write-ups report.');
     L.push('');
-    L.push(`   Consequence for Day 6: ${bestMoney.name} is the arm to build the decision engine on, and`);
-    L.push('   the selection metric has to be regret, not Brier. Convenient, because that arm is also');
-    L.push('   the auditable one — but the argument runs from the measurement, not from the preference.');
+    L.push('   WHAT THIS DOES NOT LICENCE. An earlier version of this paragraph concluded here that');
+    L.push(`   ${bestMoney.name} is therefore the arm to build Day 6 on, and claimed the argument ran from`);
+    L.push('   measurement rather than preference. That was wrong on its own terms: this is ONE split of');
+    L.push('   ONE simulated world, so the gap above has no standard error attached and nothing here can');
+    L.push('   distinguish a real ordering from the luck of the draw. Worse, TEST is the held-out sample');
+    L.push('   reserved for final reporting — choosing a component by reading it is how held-out data');
+    L.push('   quietly stops being held out, and it does not become acceptable because the reasoning');
+    L.push('   afterwards is sound.');
+    L.push('');
+    L.push('   The arm choice is made by `npm run select-arm`, which never generates this batch. Run it');
+    L.push('   for the ordering; this section reports the dissociation and stops there.');
     L.push('');
   }
 
