@@ -914,6 +914,40 @@ The residual unsafe-retry risk now lives almost entirely in one place: UNKNOWN i
 `retryCanSucceed: true`, so every abstention permits one cautious attempt. Whether that is the right
 default is a policy question, not a diagnosis question, and Day 6 owns it.
 
+> **CORRECTION, 2026-08-24 — every number in this entry was regenerated.** Day 5's seed fix
+> (`'day4' >>> 0 === 0`, see below) changed what `--seed day4` actually generates, so the figures
+> above were computed on a different batch than the command now produces. They are left in place
+> rather than quietly overwritten, because the point of this log is what happened. Current numbers:
+>
+> | | TRAIN then | TRAIN now | TEST then | TEST now |
+> |---|---|---|---|---|
+> | accuracy | 92.0% | 90.3% | 87.2% | 89.2% |
+> | abstained | 6.2% | 7.7% | 9.3% | 7.8% |
+> | unsafe retry beliefs | 10 (1.7%) | 16 (2.7%) | 20 (3.3%) | 19 (3.2%) |
+> | value at unsafe risk | ₹11,983 | ₹11,529 | — | ₹73,428 |
+> | missed human-only | 6 | 8 | — | 8 |
+> | froze unnecessarily | 0 | 0 | 0 | 0 |
+>
+> **What changed:** the generalisation gap. It was 4.8 points and is now 1.2 points (90.3% → 89.2%),
+> so the sentence above describing a 4.8-point gap "published rather than tuned away" is no longer
+> the right size, and the honest reading is that one draw showed a wide gap and another showed a
+> narrow one. That is a fact about a 600-event sample, not about the rule table, and it is the second
+> time this project has been reminded that a single seed is one observation.
+>
+> **What survived, which is the more important half:** every conclusion the entry actually rests on.
+> The TEXT tier is still 0% accurate — now 14 for 14 across both splits rather than 18 for 18. REASON,
+> FLAG, SOURCE_STEP and STATE are still 100%, DEFAULT still ~93%, and the precedence order I reasoned
+> my way to is still exactly the order the measurement produces. `falseHumanOnly` is still 0 and
+> `missedHumanOnly` is still entirely unflagged invoice disputes. Abstention is still non-zero, which
+> was the whole point of the entry.
+>
+> **One new thing the regenerated run shows.** On TEST, 19 unsafe-retry beliefs carry ₹73,428 of
+> exposure, against 16 beliefs carrying ₹11,529 on TRAIN — a similar count holding six times the
+> money. So unsafe-retry exposure is concentrated in a handful of high-value cases rather than spread
+> evenly, which is a direct input to Day 6: a guardrail that gates on *value* catches most of the
+> exposure while touching few cases, and a guardrail that gates on *count* does not. I would not have
+> found that without being made to re-run the report.
+
 ---
 
 ## [Day 5] An identity I asserted, a residual a thousand times too large, and the error flattered me
@@ -1155,5 +1189,54 @@ model that wins is also the auditable one, whose coefficients print as readable 
 a real advantage for a system that moves money, and it would have been a *bad* argument if the
 measurement had gone the other way. The argument has to run from the measurement to the choice, never
 back from the choice I would have preferred.
+
+---
+
+## [Day 5] The same Windows path bug, in a new file, five days after I wrote down the lesson
+
+**Symptom:** `npm test` on Windows: 245 of 246 passing, with `the simulator keeps ground truth in its
+own collection` failing on `ENOENT: no such file or directory, open
+'C:\C:\MohithFiles\OldLaptopFiles\Rebound\rebound\src\sim\latentTruth.js'`. Note the doubled drive
+letter. On Linux the same suite was 246 of 246.
+
+**First hypothesis:** Briefly, and alarmingly, that the boundary had actually broken — that test name
+reads like the honesty guarantee failing. It was not: the other three boundary tests, including the
+import-graph scan that does the real enforcement, all passed. This one test reads two files from disk
+and could not find them.
+
+**Root cause:** `const SRC = new URL('../src/', import.meta.url).pathname`. On POSIX that yields
+`/sessions/.../src/`, a correct absolute path. On Windows it yields `/C:/MohithFiles/.../src/` — with
+a leading slash — and `path.join` then treats it as drive-relative, producing `C:\C:\...`. The correct
+form is `fileURLToPath(new URL('../src/', import.meta.url))`.
+
+This is the *same bug* as the Day 3 entry "Worked on POSIX, wrote to C:\C:\ on Windows". I had already
+diagnosed it, already written the fix, and `src/core/env.js` and `src/razorpay/cli/live-check.js`
+already do it correctly — live-check even carries a comment warning about this exact trap. Then I
+wrote the broken form into a new file five days later.
+
+**Fix:** `fileURLToPath` in `test/boundary.test.js`, plus — the part that matters — a static check
+that scans `src/` and `test/` and fails if any file builds a filesystem path from
+`new URL(...import.meta.url...).pathname`. Deliberately narrow, so that legitimate `.pathname` on a
+network URL (which the Razorpay fakes use to route requests) is untouched; a check that flagged those
+would be disabled inside a week. With a negative control, because a detector that has never fired is
+indistinguishable from one that does not work.
+
+That check immediately failed on `test/boundary.test.js` itself, because the negative control had the
+bad form spelled out as a string literal and the scan reads every file in `test/`. The counter-example
+is now assembled from fragments at runtime. A static check that walks the tree cannot keep its own
+counter-example as a literal — a small, funny constraint that I did not anticipate.
+
+**Lesson:** Writing a lesson into a log does not prevent its recurrence. Only a check does. Both times
+this bug appeared, the reason it survived was environmental asymmetry: the tests run on Linux, the
+project lives on Windows, and `.pathname` is correct on one and silently wrong on the other. Any
+defect that is invisible in the environment where verification happens will keep coming back no matter
+how well it is documented, so it has to be converted from knowledge into an assertion. Same shape as
+the seed bug: a failure that the normal test run structurally cannot see.
+
+Second, smaller lesson about naming. This surfaced as `the simulator keeps ground truth in its own
+collection` FAILING, which for a few seconds looked like the project's central honesty claim
+collapsing. A test whose name asserts a guarantee will, when it breaks for an unrelated plumbing
+reason, appear to disprove that guarantee. Splitting the file-reading assertions from the
+boundary-enforcement assertions would have made the failure legible immediately.
 
 ---

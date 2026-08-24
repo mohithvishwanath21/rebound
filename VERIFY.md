@@ -27,7 +27,7 @@ Verify the four commands it runs, rather than trusting the label:
 
     npm test
 
-Expect `# pass 246`, `# fail 0`. Roughly 3 seconds.
+Expect `# pass 248`, `# fail 0`. Roughly 3 seconds.
 
 The tests are in three deliberately separate categories, and the distinction matters more than the
 count:
@@ -67,14 +67,24 @@ field. Two mechanisms that fail differently — one on intent at build time, one
 
 ## 4. Reproducibility — run it twice
 
+In PowerShell (the default terminal on Windows):
+
+    node src/eval/cli/model-report.js *> "$env:TEMP\run1.txt"
+    node src/eval/cli/model-report.js *> "$env:TEMP\run2.txt"
+    Compare-Object (Get-Content "$env:TEMP\run1.txt") (Get-Content "$env:TEMP\run2.txt")
+
+In bash or cmd:
+
     node src/eval/cli/model-report.js > run1.txt
     node src/eval/cli/model-report.js > run2.txt
-    fc run1.txt run2.txt
+    diff run1.txt run2.txt          # or: fc.exe run1.txt run2.txt
 
-Expect no differences except the trailing timing line. This is not free: it required pinning an
-evaluation clock, because the generator's `now` defaults to wall-clock time and two features read the
-calendar. See the Day 5 entry "The same report, run twice, two minutes apart, printed different
-numbers."
+Expect no differences except the trailing timing line. Verified on 2026-08-24: the only lines that
+differed were the echoed command and `(16.1s)` versus `(16.2s)`. Every number was identical.
+
+This is not free: it required pinning an evaluation clock, because the generator's `now` defaults to
+wall-clock time and two features read the calendar. See the Day 5 entry "The same report, run twice,
+two minutes apart, printed different numbers."
 
 Then check that seeds actually do something, which is a different property and was broken for four
 days:

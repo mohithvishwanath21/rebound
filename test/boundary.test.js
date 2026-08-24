@@ -22,8 +22,22 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const SRC = new URL('../src/', import.meta.url).pathname;
+/**
+ * `fileURLToPath`, NOT `new URL(...).pathname`.
+ *
+ * On POSIX the two agree, which is exactly why this was wrong for five days without failing here.
+ * On Windows `.pathname` yields '/C:/MohithFiles/...' — with a leading slash — and `join` then
+ * treats that as drive-relative, producing 'C:\C:\MohithFiles\...' and an ENOENT. So this file
+ * passed on Linux and failed on the machine the project actually lives on.
+ *
+ * This is the same bug as the Day 3 entry "Worked on POSIX, wrote to C:\C:\ on Windows", recurring
+ * in a new file because the lesson was written down and never enforced anywhere. `src/core/env.js`
+ * and `src/razorpay/cli/live-check.js` already did it correctly, and live-check even carries a
+ * comment warning about it — which made this a bug I had already documented the fix for.
+ */
+const SRC = fileURLToPath(new URL('../src/', import.meta.url));
 
 /**
  * Directories whose code must never be able to see ground truth.
@@ -208,4 +222,57 @@ test('the simulator keeps ground truth in its own collection', () => {
       `world.js must not contain "${token}" — the agent reads these models`
     );
   }
+});
+
+/**
+ * REGRESSION: no filesystem path is built from `new URL(...).pathname`.
+ *
+ * This check exists because the underlying bug has now happened TWICE — once in Day 3's evidence
+ * writer, and again on line 26 of this very file, which spent five days passing on Linux and
+ * failing on Windows with 'C:\C:\MohithFiles\...'. Both times the lesson was written into the
+ * engineering log, and writing it down did not stop it recurring, because nothing checked.
+ *
+ * On POSIX `.pathname` and `fileURLToPath` agree, so the bug is invisible in any environment where
+ * the tests are normally run and fatal on the machine the project is developed on. That asymmetry is
+ * what makes it worth a static check rather than trust.
+ *
+ * Deliberately narrow: it only fires on a URL built from `import.meta.url`, so ordinary use of
+ * `.pathname` on a network URL — which the Razorpay test fakes do legitimately, to route a request —
+ * is untouched. A check that flagged those would be turned off within a week.
+ */
+test('REGRESSION: filesystem paths use fileURLToPath, never URL.pathname', () => {
+  const ROOT = fileURLToPath(new URL('../', import.meta.url));
+  const offenders = [];
+
+  for (const dir of ['src', 'test']) {
+    for (const file of walk(join(ROOT, dir))) {
+      const code = stripComments(readFileSync(file, 'utf8'));
+      // `new URL(<anything>import.meta.url<anything>).pathname`
+      if (/new\s+URL\([^)]*import\.meta\.url[^)]*\)\s*\.pathname/.test(code)) {
+        offenders.push(relative(ROOT, file));
+      }
+    }
+  }
+
+  assert.deepEqual(
+    offenders, [],
+    `these build a filesystem path from URL.pathname, which yields '/C:/...' on Windows and then ` +
+    `joins to 'C:\\C:\\...'. Use fileURLToPath(new URL(...)) instead: ${offenders.join(', ')}`
+  );
+});
+
+/**
+ * And the negative control, because a static check that cannot fail is decoration. The Day 4 lesson
+ * was that a detector which has never fired is indistinguishable from a detector that does not work.
+ */
+test('the pathname detector actually detects (negative control)', () => {
+  // Assembled from fragments on purpose. Spelling the bad form out as a literal would put it in this
+  // file's own source, and the scan above reads every file in `test/` — including this one. A static
+  // check that scans the tree cannot keep its own counter-example as a literal.
+  const PATHNAME = '.path' + 'name';
+  const bad = `const SRC = new URL('../src/', import.meta.url)${PATHNAME};`;
+  const good = `const SRC = fileURLToPath(new URL('../src/', import.meta.url));`;
+  const re = /new\s+URL\([^)]*import\.meta\.url[^)]*\)\s*\.pathname/;
+  assert.ok(re.test(bad), 'the detector missed the exact line that broke on Windows');
+  assert.ok(!re.test(good), 'the detector flagged the correct form');
 });
