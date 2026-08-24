@@ -60,6 +60,7 @@ import { splitByEvent } from '../modelComparison.js';
 import { observe } from '../../agent/observe.js';
 import { diagnose } from '../../agent/diagnose.js';
 import { fitLookupTable, fitPlatt } from '../../ml/calibration.js';
+import { fitLogistic } from '../../ml/logistic.js';
 import { createRecoveryScorer } from '../../agent/recoveryModel.js';
 import { decideBatch, explainDecision } from '../../agent/decide.js';
 import { MONEY_MOVING, CUSTOMER_CONTACTING } from '../../core/actions.js';
@@ -161,7 +162,49 @@ const lookup = fitLookupTable(fit, {
 const rawCal = cal.map((r) => lookup.predictRow(r));
 const platt = fitPlatt(cal.map((r) => r.y), rawCal);
 const plattIsIdentity = platt.a === 1 && platt.b === 0;
-const scoreAction = createRecoveryScorer({ model: lookup, calibrator: platt, modelName: 'lookup+platt' });
+
+/**
+ * THE ARM THE SELECTION PROCEDURE ACTUALLY CHOSE.
+ *
+ * `npm run select-arm` prints `SELECTED: logistic`, and until Day 6 this command scored with the
+ * lookup table anyway. That was a real defect and not a considered exception: the whole point of a
+ * pre-declared selection rule is that its verdict is binding, and a selection procedure whose output
+ * nothing reads is a ceremony. Nothing here documented the divergence, which is how it survived.
+ *
+ * READ THE REST OF THAT LINE, THOUGH: `SELECTED: logistic — BY TIEBREAK, NOT BY MEASUREMENT`. Three
+ * arms cannot be separated at the pre-declared |t| ≥ 2.0 bar in distribution, and `gbm` — not the arm
+ * shipped here — leads mean in-distribution regret. So logistic ships on a preference order declared
+ * before the sweep ran, reinforced by the representational argument below, and NOT because it was
+ * measured best on the selecting set. Under distribution shift it is separably better than the table;
+ * in distribution the two are equivalent on this evidence. Binding is not the same as vindicated, and
+ * writing "select-arm chose logistic" without the second half of the sentence would upgrade a labelled
+ * judgement call into a finding — the exact move this repo has had to correct three times already.
+ *
+ * It also had a measurable cost. The lookup key is (diagnosed cause, action kind), so two
+ * `RETRY_SCHEDULED` candidates a week apart shared one cell and one rate. The audit trail below used
+ * to show seven scheduled candidates tied to the paise, resolved by an alphabetical tiebreak — while
+ * the fixed simulator separates those slots by up to 25x. `buildFeatures` emits `salaryWindow`,
+ * `delayDays` and `isScheduled`, so the logistic arm can represent the difference and the GROUP BY
+ * structurally cannot.
+ *
+ * Hyperparameters match `armSelection.js` exactly (l2 1e-4, 500 iterations, lr 0.5). If they drift,
+ * the arm being shipped is not the arm that was selected, and the selection stops meaning anything.
+ *
+ * SUPPORT STILL COMES FROM THE TABLE. A logistic model extrapolates a confident number for a cell it
+ * never saw, which is exactly what the stopping rules exist to catch. Passing `supportFrom: lookup`
+ * keeps "how likely is this?" and "how much data is behind it?" answered by the right instruments.
+ */
+const logistic = fitLogistic(fit, { l2: 1e-4, iterations: 500, learningRate: 0.5 });
+const rawLogCal = cal.map((r) => logistic.predict(r.x));
+const logPlatt = fitPlatt(cal.map((r) => r.y), rawLogCal);
+const logPlattIsIdentity = logPlatt.a === 1 && logPlatt.b === 0;
+
+const scoreAction = createRecoveryScorer({
+  model: logistic,
+  calibrator: logPlatt,
+  supportFrom: lookup,
+  modelName: 'logistic+platt',
+});
 
 /**
  * A DIAGNOSTIC SECOND TABLE, FITTED ONLY TO MEASURE SOMETHING THE FIRST ONE CANNOT SHOW.
@@ -251,7 +294,21 @@ if (asJson) {
     seed: f.seed,
     split: f.split,
     now: now.toISOString(),
-    model: { arm: 'lookup', groups: lookup.groups, supportedGroups: lookup.supportedGroups, fitRows: fit.length, calRows: cal.length, platt: { a: platt.a, b: platt.b, isIdentity: plattIsIdentity } },
+    model: {
+      arm: 'logistic',
+      features: logistic.weights.length,
+      iterationsRun: logistic.iterationsRun,
+      finalGradNorm: logistic.finalGradNorm,
+      platt: { a: logPlatt.a, b: logPlatt.b, isIdentity: logPlattIsIdentity },
+      fitRows: fit.length,
+      calRows: cal.length,
+      // The support instrument is a different model from the probability instrument. Reported
+      // separately so a consumer cannot mistake one for the other.
+      support: { arm: 'lookup', groups: lookup.groups, supportedGroups: lookup.supportedGroups },
+      // Kept as a diagnostic: a GROUP BY is perfectly calibrated in-sample, so an identity Platt
+      // here would mean the event split silently stopped happening. See the note above.
+      lookupPlatt: { a: platt.a, b: platt.b, isIdentity: plattIsIdentity },
+    },
     summary,
     stopReasons: Object.fromEntries(stopsByCode),
     supportMix: Object.fromEntries(supportMix),
@@ -264,13 +321,18 @@ if (asJson) {
   L.push('  REBOUND — BATCH DECISION REPORT');
   L.push('  ' + '='.repeat(74));
   L.push(`  seed ${f.seed}   split ${f.split}   cases ${summary.cases}   deciding at ${now.toISOString()}`);
-  L.push(`  model: GROUP BY (diagnosed cause, action) + Platt, fitted on TRAIN`);
-  L.push(`         ${lookup.groups} cells, ${lookup.supportedGroups} with enough support to use their own rate`);
-  L.push(`         table fitted on ${fit.length} rows, calibrator on ${cal.length} held-out rows`);
-  L.push(`         Platt a=${platt.a.toFixed(4)} b=${platt.b.toFixed(4)}` +
-    (plattIsIdentity
+  L.push(`  model: LOGISTIC over ${logistic.weights.length} observable features + Platt, fitted on TRAIN`);
+  L.push(`         the arm 'npm run select-arm' selects; converged in ${logistic.iterationsRun} iterations,` +
+    ` final |grad| ${logistic.finalGradNorm.toExponential(1)}`);
+  L.push(`         Platt a=${logPlatt.a.toFixed(4)} b=${logPlatt.b.toFixed(4)}` +
+    (logPlattIsIdentity
       ? '   !! exactly the identity — the calibrator saw in-sample rows and could not move'
       : ''));
+  L.push(`  support: GROUP BY (diagnosed cause, action), ${lookup.groups} cells,` +
+    ` ${lookup.supportedGroups} with enough support to use their own rate`);
+  L.push(`         a logistic extrapolates a confident number for a cell it never saw, so "how likely"`);
+  L.push(`         and "how much data is behind it" are answered by different instruments on purpose`);
+  L.push(`         fitted on ${fit.length} rows, calibrators on ${cal.length} held-out rows`);
   L.push('');
   L.push(`  Total at risk in this batch: ${RUPEE(summary.totalExposurePaise)}`);
   L.push('');

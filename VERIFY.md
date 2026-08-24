@@ -29,7 +29,7 @@ Verify the five commands it runs, rather than trusting the label:
 
     npm test
 
-Expect `# pass 402`, `# fail 0`, `# todo 0`. Roughly 7 seconds. Section 8 explains why the count moved
+Expect `# pass 406`, `# fail 0`, `# todo 0`. Roughly 7 seconds. Section 8 explains why the count moved
 and why there are no longer any `todo` entries.
 
 The tests are in three deliberately separate categories, and the distinction matters more than the
@@ -273,13 +273,13 @@ reasons, both human queues, and a full audit trail for one case.
 Read the two share columns against each other first:
 
     outcome             cases   share       at risk   share   exp. recovery
-    ACT                   159   79.5%      ₹3,48,170  16.7%        ₹42,129
-    AWAIT_APPROVAL         27   13.5%     ₹15,46,468  74.2%      ₹2,01,286
+    ACT                   152   76.0%      ₹3,46,506  16.6%        ₹40,691
+    AWAIT_APPROVAL         28   14.0%     ₹15,46,865  74.3%      ₹2,08,210
     ESCALATE_HUMAN         12    6.0%      ₹1,87,933   9.0%             ₹0
-    STOP_PERMANENT          2    1.0%           ₹268   0.0%             ₹0
+    STOP_PERMANENT          8    4.0%         ₹1,535   0.1%             ₹0
 
-They disagree on purpose. 79.5% of *cases* are acted on automatically and they carry 16.7% of the
-*money*; the 13.5% held for approval carry 74.2%. A recovery agent that treated cases as
+They disagree on purpose. 76.0% of *cases* are acted on automatically and they carry 16.6% of the
+*money*; the 14.0% held for approval carry 74.3%. A recovery agent that treated cases as
 interchangeable would show these columns tracking each other. Value, not count, is the entire thesis.
 
 **The column most worth attacking.** `exp. recovery` is the agent's own arithmetic — the sum of the
@@ -313,32 +313,43 @@ a real merchant would have (`cause | action | matchTier | touchesUsed`, 408 cell
 0.3% unseen and 4.3% fallback. The mechanism is carried by `test/recoveryModel.test.js`, not by this
 batch.
 
-**A second limitation, and this one is a defect rather than a property of the generator.** In the
-audit trail printed by `--explain`, the scheduled retries are all priced identically:
+**The defect this section used to describe, and what closing it changed.** Until Day 6 the audit trail
+printed seven `RETRY_SCHEDULED` candidates tied to the paise, spanning a week, resolved by an
+alphabetical tiebreak on the action signature. Chasing that tie found the simulator bug in §8. Fixing
+the simulator was only half of it: the engine scored with the lookup table, whose key is
+`(diagnosed cause, action kind)`, so two slots sharing a kind shared a cell and one rate — while the
+fixed ground truth separated them by up to 25x. The engine is now wired to the arm the selection
+procedure actually names, and the ranking separates:
 
     rank  action                                      EV   verdict
-    1     RETRY_NOW                                  ₹37   ALLOW  <- chosen
-    2     RETRY_SCHEDULED:2026-08-24T15:30:          ₹31   ALLOW
-    3     RETRY_SCHEDULED:2026-08-24T21:30:          ₹31   ALLOW
-    ...   (seven slots, spanning a week, all ₹31)
+    1     RETRY_NOW                                  ₹12   ALLOW  <- chosen
+    2     RETRY_SCHEDULED:2026-08-24T15:30:          ₹11   ALLOW
+    3     RETRY_SCHEDULED:2026-08-24T21:30:          ₹11   ALLOW
+    4     RETRY_SCHEDULED:2026-08-25T09:30:          ₹10   ALLOW
+    5     SWITCH_RAIL_NUDGE:WHATSAPP                 ₹10   ALLOW
+    6     RETRY_SCHEDULED:2026-08-26T09:30:           ₹9   ALLOW
 
-Seven candidates tied to the paise is not a coincidence, and chasing exactly this tie is what found
-the defect in §8. That half is fixed: the simulator now separates those slots by up to 25x. This half
-is not. The engine scores with `createRecoveryScorer({ model: lookup, ... })` — a
-`(diagnosedCause, actionKind)` GROUP BY — and two slots sharing a kind share a cell by construction,
-so no amount of feature work can make the shipped model see the difference. The tie is then resolved
-alphabetically, which for ISO-8601 UTC means the soonest slot wins.
+Monotone in the slot, and a non-retry action now interleaves at rank 5 instead of sitting below a
+block of ties. The header names the arm it used, and `--json` reports `model.arm` and
+`model.support.arm` separately.
 
-Worth being blunt about what that costs: before the simulator was fixed this blindness was free,
-because the true rates were identical too. Now the ground truth cares and the agent cannot, so it is
-live error, and it is part of why regret tripled in §6. `test/retryTiming.test.js` pins it with a
-passing test whose docblock says it documents a limitation rather than a solved problem.
+**Two things worth checking rather than believing here.** First, the probability and the support come
+from *different models*: a logistic over 140 observable features estimates `p`, and the `(cause,
+action)` table reports how many rows back that region. That is not a workaround — a logistic will
+return a confident number for a cell it never saw, which is exactly what the stopping rules exist to
+catch. Second, `STOP_PERMANENT` went from 2 cases to 8 and `NEGATIVE_EV` now closes 8 cases worth
+₹1,535 in total. That is the new arm pricing small, old, hopeless cases below the cost of touching
+them, which is the intended behaviour and shows up as *more* stopping, not less.
 
-There is a related gap in the same area, stated because a reader will otherwise find it and wonder:
-`npm run select-arm` prints `SELECTED: logistic`, and this command uses `lookup+platt`. The logistic
-arm already consumes `salaryWindow`, `delayDays` and `isScheduled` from `src/ml/features.js`, so the
-selection procedure's own verdict points at an arm that can represent the thing the shipped one
-cannot. Nothing in `decide-report.js` currently justifies the divergence. Both are open.
+**How this was allowed to happen, since that is the more useful thing to record.** `select-arm` printed
+`SELECTED: logistic` and this command used `lookup`, for six days, with a full green suite. The choice
+of `lookup` *was* documented — in `src/agent/recoveryModel.js`, on the good grounds that a 20-world
+sweep had found no arm measurably beating a GROUP BY. What made it a defect was that the sweep
+predated the simulator fix, so it had been run in a world where the one thing a feature model can
+express and a GROUP BY cannot was switched off. A justification can expire without anyone editing it.
+No test failed, because every test asserted the seam *could* carry a timing distinction and none
+asserted that the shipped entry point *did*. `test/recoveryModel.test.js` now closes that with a
+source-level assertion, and its docblock says plainly why a brittle test is the right instrument here.
 
 **Reproducibility.** `DEFAULT_NOW` is fixed at `2026-08-24T09:30:00Z`. Using `new Date()` would make
 quiet hours, case age and retry gaps irreproducible — the same command would give different answers
@@ -362,7 +373,8 @@ it, and it is why the file is kept rather than deleted. Its second block was alw
 claimed; the first block is what the code did.
 
 The three `todo` tests in `test/retryTiming.test.js` are now live assertions, joined by two more the
-fix itself demanded. **Expect 402 tests, 402 pass, 0 fail, 0 todo.**
+fix itself demanded, and four in `test/recoveryModel.test.js` covering the second half of the fix.
+**Expect 406 tests, 406 pass, 0 fail, 0 todo.**
 
     node --test test/retryTiming.test.js
 

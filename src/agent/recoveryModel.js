@@ -24,15 +24,48 @@
  *      action wins, only whether the winner clears the bar. Wiring it in at the seam makes that
  *      property obvious instead of load-bearing and invisible.
  *
- * WHY THE ARM IS `lookup` AND NOT THE GRADIENT BOOSTER
- * ---------------------------------------------------
- * Because the measurement said so, twice. The five-arm table on a single split suggested the
- * structured models were ahead; a 20-world sweep corrected that and showed no arm measurably beats
- * a GROUP BY on (diagnosed cause, action) on this simulator. Shipping the booster anyway would mean
- * the headline architecture claim rested on a difference the eval could not detect. Swapping the arm
- * is a one-line change here (`createRecoveryScorer` takes any object with `predictRow`), and that is
- * the point of putting the seam in its own file: the choice is reversible and the evidence for it
- * lives in `npm run select-arm`.
+ * WHICH ARM SHIPS, AND WHY THAT ANSWER CHANGED
+ * --------------------------------------------
+ * It was `lookup`, and the reason was good: a 20-world paired sweep found that no arm measurably beat
+ * a GROUP BY on (diagnosed cause, action) on this simulator, so shipping a gradient booster would have
+ * rested the headline architecture claim on a difference the eval could not detect.
+ *
+ * That reason expired on Day 6. The sweep it rested on was run against a simulator that priced every
+ * scheduled retry at the decision instant, so the single thing a feature model can express and a
+ * GROUP BY structurally cannot — WHEN to retry — had been switched off in the ground truth it was
+ * measured against. With the simulator fixed, the paired difference under distribution shift is
+ * −1.51% at t = −2.46, which clears the pre-declared bar of |t| ≥ 2.0. In distribution it still does
+ * not (−0.42%, t = −1.36). So the honest claim is conditional, and it is stated that way everywhere.
+ *
+ * THOSE FOUR NUMBERS COME FROM `--seeds=20`, WHICH IS NOT THE DEFAULT. `npm run select-arm` runs ten
+ * worlds and prints −0.85%/t = −1.98 in distribution and −2.51%/t = −2.22 under shift. Twenty was the
+ * pre-registered design, so twenty is what is reported; the default was left at ten and the mismatch
+ * is written up in the Day 6 log. Reproduce with `node src/eval/cli/select-arm.js --seeds=20`. Quoting
+ * a t-statistic without the n behind it is how a reader ends up unable to reconcile two honest runs.
+ *
+ * Note also what the selection says about itself: `SELECTED: logistic — BY TIEBREAK, NOT BY
+ * MEASUREMENT`. Three arms fail to separate in distribution and `gbm`, not `logistic`, leads mean
+ * in-distribution regret. The arm ships on the preference order declared before the sweep ran, plus
+ * the representational argument below — not because it was measured best on the selecting set.
+ *
+ * The decisive argument is not the t-statistic, though. It is that the GROUP BY *cannot represent the
+ * decision the product is most distinctive about*. Two `RETRY_SCHEDULED` candidates a week apart share
+ * a cause and a kind, so they share a cell and receive one rate — while the ground truth now separates
+ * them by up to 25x. The audit trail showed seven scheduled candidates tied to the paise, resolved by
+ * an alphabetical tiebreak on the action signature. No amount of data fixes that; it is the key.
+ *
+ * PROBABILITY AND SUPPORT NOW COME FROM DIFFERENT PLACES, DELIBERATELY
+ * -------------------------------------------------------------------
+ * A logistic model has no notion of support. It will happily extrapolate a confident number for a
+ * (cause, action) pair it never saw, which is precisely the failure the stopping rules exist to catch,
+ * and swapping the arm naively would have set `hasSupport` false and escalated every case in the batch
+ * while the guardrail summary still looked healthy.
+ *
+ * So the two are separated: `model` estimates the probability, `supportFrom` reports how much data
+ * backs it. That is not a workaround, it is the correct factoring — support answers "how many rows
+ * were behind this?", which is a question about the TRAINING DATA and not about the estimator. The
+ * coarse table remains the right instrument for it precisely because it is coarse: 66 dense cells give
+ * a stable read on whether a region of the problem was observed at all.
  *
  * WHAT THIS DELIBERATELY DOES NOT DO
  * ----------------------------------
@@ -42,6 +75,7 @@
  */
 
 import { ActionKind, MONEY_MOVING, CUSTOMER_CONTACTING } from '../core/actions.js';
+import { buildFeatures } from '../ml/features.js';
 
 /** Kinds whose probability of recovering money is a real quantity. The rest are structurally zero. */
 const RECOVERING = new Set([...MONEY_MOVING, ...CUSTOMER_CONTACTING]);
@@ -75,26 +109,54 @@ const P_FLOOR = 0.001;
 const P_CEILING = 0.98;
 
 /**
- * @param {object}   model         anything with `predictRow(row)`; `supportFor(row)` strongly preferred
+ * The three feature columns that exist only to express retry timing. Surfaced in the returned belief
+ * so the audit trail can show WHY two scheduled slots were priced differently, rather than asserting
+ * that they were. When the shipped arm was a GROUP BY these were unreachable from the decision path,
+ * and their absence from the audit trail is what let the tie go unnoticed for a day.
+ */
+const TIMING_COLUMNS = ['salaryWindow', 'delayDays', 'isScheduled'];
+
+/**
+ * @param {object}   model         `predictRow(row)` (a GROUP BY) or `predict(x)` (a feature model)
  * @param {object?}  calibrator    Platt result from `fitPlatt`, i.e. `{ apply(p) }`
  * @param {string}   modelName     recorded in the audit trail so a decision can be traced to an arm
+ * @param {object?}  supportFrom   anything with `supportFor(row)`. REQUIRED for a feature model,
+ *                                 which has no notion of support. See the header.
  * @returns {function} a `scoreAction` suitable for `decideForCase`
  */
-export function createRecoveryScorer({ model, calibrator = null, modelName = 'lookup' } = {}) {
-  if (typeof model?.predictRow !== 'function') {
-    throw new TypeError('createRecoveryScorer needs a model exposing predictRow(row)');
+export function createRecoveryScorer({ model, calibrator = null, modelName = 'lookup', supportFrom = null } = {}) {
+  /**
+   * TWO WAYS TO GET A PROBABILITY, AND THE DIFFERENCE IS THE WHOLE POINT OF THIS COMMIT.
+   *
+   * A GROUP BY consumes a `row` — a cause and an action kind — and by construction cannot see
+   * anything else, including when a scheduled action lands. A feature model consumes the vector from
+   * `buildFeatures`, which is built from the same `{diagnosis, observed, action, context}` the engine
+   * already passes, with `context.now` set to the EXECUTION instant by `decide.js`. So the timing
+   * information was flowing correctly through the engine the entire time; this seam was throwing it
+   * away because the model on the other side had nowhere to put it.
+   */
+  const rowBased = typeof model?.predictRow === 'function';
+  const featureBased = !rowBased && typeof model?.predict === 'function';
+  if (!rowBased && !featureBased) {
+    throw new TypeError('createRecoveryScorer needs a model exposing predictRow(row) or predict(featureVector)');
   }
   if (calibrator !== null && typeof calibrator?.apply !== 'function') {
     throw new TypeError('calibrator must expose apply(p), as returned by fitPlatt');
   }
 
   /**
-   * A model with no `supportFor` cannot distinguish evidence from a fallback, and the stopping
-   * rules would then read UNKNOWN on every case and escalate everything. That is the safe
-   * direction, but it silently disables the entire stopping mechanism — a demo that escalates 100%
-   * of a batch while reporting healthy guardrails. Better to say so out loud.
+   * A model with no support reporting cannot distinguish evidence from a fallback, and the stopping
+   * rules would then read UNKNOWN on every case and escalate everything. That is the safe direction,
+   * but it silently disables the entire stopping mechanism — a demo that escalates 100% of a batch
+   * while reporting healthy guardrails. Better to say so out loud.
    */
-  const hasSupport = typeof model.supportFor === 'function';
+  const supportModel = supportFrom ?? (typeof model?.supportFor === 'function' ? model : null);
+  const hasSupport = typeof supportModel?.supportFor === 'function';
+
+  const probeRow = rowForScoring({
+    diagnosis: { rootCause: 'INSUFFICIENT_FUNDS' },
+    action: { kind: ActionKind.RETRY_NOW },
+  });
 
   /**
    * CONSTRUCTION-TIME CHECK ON THE KEY AGREEMENT. If the row shape this file builds does not match
@@ -103,9 +165,29 @@ export function createRecoveryScorer({ model, calibrator = null, modelName = 'lo
    * non-empty fit turns that into an immediate error.
    */
   if (hasSupport) {
-    const probe = model.supportFor(rowForScoring({ diagnosis: { rootCause: 'INSUFFICIENT_FUNDS' }, action: { kind: ActionKind.RETRY_NOW } }));
+    const probe = supportModel.supportFor(probeRow);
     if (!probe || typeof probe.state !== 'string') {
-      throw new TypeError('model.supportFor(row) must return { state, rows }');
+      throw new TypeError('supportFor(row) must return { state, rows }');
+    }
+  }
+
+  /**
+   * WIDTH CHECK, because the alternative is silent and wrong. `predict` dot-products the vector
+   * against the fitted weights; a feature vector one column shorter than the weights it was fitted
+   * against still produces a finite, plausible-looking probability, just computed against the wrong
+   * columns. That is unfalsifiable from the output. Checked once here instead.
+   */
+  if (featureBased && Array.isArray(model.weights) && model.weights.length > 0) {
+    const width = buildFeatures({
+      diagnosis: { rootCause: 'INSUFFICIENT_FUNDS', physics: {} },
+      observed: { lossType: 'FAILED_PAYMENT', rail: 'CARD', amountPaise: 1000 },
+      action: { kind: ActionKind.RETRY_NOW },
+      context: { now: new Date(0), touchesUsed: 0 },
+    }).values.length;
+    if (width !== model.weights.length) {
+      throw new TypeError(
+        `feature width mismatch: buildFeatures emits ${width} columns, model was fitted on ${model.weights.length}`
+      );
     }
   }
 
@@ -121,7 +203,21 @@ export function createRecoveryScorer({ model, calibrator = null, modelName = 'lo
     }
 
     const row = rowForScoring({ diagnosis, action });
-    const raw = model.predictRow(row);
+
+    let raw;
+    let timing = null;
+    if (rowBased) {
+      raw = model.predictRow(row);
+    } else {
+      const { names, values } = buildFeatures({ diagnosis, observed, action, context });
+      raw = model.predict(values);
+      timing = {};
+      for (const col of TIMING_COLUMNS) {
+        const i = names.indexOf(col);
+        if (i >= 0) timing[col] = values[i];
+      }
+    }
+
     if (!Number.isFinite(raw)) {
       throw new TypeError(`model returned no probability for ${row.diagnosedCause}|${row.actionKind}`);
     }
@@ -130,10 +226,16 @@ export function createRecoveryScorer({ model, calibrator = null, modelName = 'lo
     const p = Math.min(P_CEILING, Math.max(P_FLOOR, calibrated));
 
     const support = hasSupport
-      ? model.supportFor(row)
+      ? supportModel.supportFor(row)
       : { state: 'UNKNOWN', rows: 0, note: 'model cannot report support; every stop will be blocked' };
 
-    return { p, raw, calibrated, support, model: modelName, cell: `${row.diagnosedCause}|${row.actionKind}`, context: context.now ?? null };
+    return {
+      p, raw, calibrated, support,
+      model: modelName,
+      cell: `${row.diagnosedCause}|${row.actionKind}`,
+      ...(timing ? { timing } : {}),
+      context: context.now ?? null,
+    };
   };
 }
 

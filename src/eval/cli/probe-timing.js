@@ -1,20 +1,29 @@
 /**
- * REPRODUCTION FOR THE RETRY-TIMING DEFECT
- * ========================================
+ * REPRODUCTION FOR THE RETRY-TIMING DEFECT — NOW A REGRESSION CHECK
+ * ================================================================
  *
- * Referenced by VERIFY.md section 8 and by the last Day 6 entry in ENGINEERING_LOG.md. One command,
- * no arguments, no state: prints the same case priced two ways so the gap is visible rather than
- * argued.
+ * Referenced by VERIFY.md section 8 and by the Day 6 entries in ENGINEERING_LOG.md. One command, no
+ * arguments, no state: prints the same case priced two ways.
  *
- * THE DEFECT. `recoveryProbability` never reads `action.scheduledFor`. Its funds-timing branch
- * computes the salary-window boost from `now` — the instant of the DECISION — which is identical for
- * every candidate being compared against each other. So the simulator cannot prefer one scheduled
- * slot to another, while three of its own comments say that preference is the largest timing effect
- * it models.
+ * THE DEFECT, PAST TENSE. `recoveryProbability` did not read `action.scheduledFor`. Its funds-timing
+ * branch computed the salary-window boost from `now` — the instant of the DECISION — which is identical
+ * for every candidate being compared against each other. So the simulator could not prefer one
+ * scheduled slot to another, while three of its own comments said that preference was the largest
+ * timing effect it modelled. Every measured number in this repo before that commit was computed against
+ * a ground truth with the timing decision switched off.
  *
- * The two blocks below differ in exactly one thing: which instant is passed as `now`. The first is
- * what `src/eval/dataset.js` does today when it labels rows, and therefore what every measured number
- * in this repo has been computed against. The second is what the comments describe.
+ * WHAT THE TWO BLOCKS MEAN NOW, AND WHY THE FILE IS KEPT RATHER THAN DELETED. They differ in exactly
+ * one thing: which instant is passed as `now`. The first passes the decision instant, which is what
+ * `src/eval/dataset.js` does when it labels rows. The second passes the landing instant explicitly.
+ *
+ * Before the fix those printed different numbers, and the difference WAS the bug. They now print the
+ * same numbers, because the model derives the landing instant from `action.scheduledFor` itself instead
+ * of trusting its caller to pass the right `now`. **Agreement between the two blocks is the passing
+ * signal.** If they ever diverge again, the model has gone back to depending on the caller's clock —
+ * which is the one thing every call site had been getting subtly wrong.
+ *
+ * The behaviour is pinned properly in `test/retryTiming.test.js`; this command exists so the claim can
+ * be seen in rupees and probabilities without reading a test file.
  *
  * This lives under `src/eval/` and not `src/agent/`, because it imports the response model and
  * therefore latent truth; `test/boundary.test.js` forbids that anywhere else.
@@ -50,23 +59,35 @@ const candidates = [
 
 console.log('Payer is TEMPORARILY_SHORT; salary credit lands', latent.fundsAvailableFrom);
 console.log('Deciding at', now.toISOString());
-console.log('\nAS THE DATASET LABELS IT — now = the DECISION instant for every candidate:');
+console.log('\nBLOCK A — now = the DECISION instant, exactly as src/eval/dataset.js labels rows:');
+const blockA = [];
 for (const { label, action } of candidates) {
   const { p, breakdown } = recoveryProbability({ action, latent, event, now, touchesUsed: 0, assumptions: A });
+  blockA.push(p);
   console.log(`  ${label.padEnd(30)} p=${p.toFixed(6)}  salaryWindow=${breakdown.salaryWindow ?? '-'} preFunds=${breakdown.preFunds ?? '-'}`);
 }
 
-console.log('\nIF now WERE THE INSTANT THE ACTION ACTUALLY LANDS (what the comment claims):');
+console.log('\nBLOCK B — now = the instant the action actually lands, passed explicitly:');
+const blockB = [];
 for (const { label, action } of candidates) {
   const effective = action.scheduledFor ? new Date(action.scheduledFor) : now;
   const { p, breakdown } = recoveryProbability({ action, latent, event, now: effective, touchesUsed: 0, assumptions: A });
+  blockB.push(p);
   console.log(`  ${label.padEnd(30)} p=${p.toFixed(6)}  salaryWindow=${breakdown.salaryWindow ?? '-'} preFunds=${breakdown.preFunds ?? '-'}`);
 }
 
-const asLabelled = candidates
-  .filter((c) => c.action.scheduledFor)
-  .map(({ action }) => recoveryProbability({ action, latent, event, now, touchesUsed: 0, assumptions: A }).p);
+/**
+ * The verdict, stated by the command rather than left for the reader to eyeball. Before the fix the
+ * two blocks disagreed and the scheduled offsets in block A collapsed to a single distinct value.
+ */
+const distinctA = new Set(blockA.slice(1).map((p) => p.toFixed(12))).size;
+const blocksAgree = blockA.every((p, i) => Math.abs(p - blockB[i]) < 1e-12);
+
+console.log(`\ndistinct probabilities across the three scheduled offsets, block A: ${distinctA} of 3`);
+console.log(`blocks A and B agree: ${blocksAgree ? 'YES' : 'NO'}`);
 console.log(
-  '\ndistinct trueP across the three scheduled offsets, as labelled:',
-  new Set(asLabelled.map((p) => p.toFixed(12))).size
+  distinctA === 3 && blocksAgree
+    ? 'PASS — the model derives the landing instant itself, so the caller\'s clock no longer decides.'
+    : 'FAIL — the timing defect is back: pricing depends on which instant the caller happens to pass.'
 );
+process.exit(distinctA === 3 && blocksAgree ? 0 : 1);

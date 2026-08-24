@@ -17,7 +17,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { readFileSync } from 'node:fs';
+
 import { fitLookupTable } from '../src/ml/calibration.js';
+import { featureNames } from '../src/ml/features.js';
 import { createRecoveryScorer, createConstantScorer, rowForScoring } from '../src/agent/recoveryModel.js';
 import { ActionKind } from '../src/core/actions.js';
 
@@ -243,6 +246,129 @@ test('the adapter refuses inputs it cannot honour', () => {
   // A model whose predictRow returns nothing must not be read as zero.
   const broken = { predictRow: () => undefined, supportFor: () => ({ state: 'SUPPORTED', rows: 9 }) };
   assert.throws(() => call(createRecoveryScorer({ model: broken }), 'ANY', ActionKind.RETRY_NOW), TypeError);
+});
+
+// =============================================================================================
+// THE FEATURE-MODEL PATH — added when the engine stopped shipping a GROUP BY
+// =============================================================================================
+
+/**
+ * WHY THESE EXIST, AND WHAT THEY WOULD HAVE CAUGHT.
+ *
+ * For six days the decision engine scored with a table keyed on (diagnosed cause, action kind). Two
+ * `RETRY_SCHEDULED` candidates a week apart share both, so they shared a cell and received one rate:
+ * the audit trail printed seven scheduled candidates tied to the paise, decided by an alphabetical
+ * tiebreak on the signature. That was invisible while the simulator also priced every slot alike, and
+ * became live error the moment it did not.
+ *
+ * Nothing failed when the engine was blind, which is the actual lesson. These tests are the tripwire
+ * that was missing: they assert the SEAM can carry a timing distinction, so reverting the arm to a
+ * GROUP BY breaks a test instead of quietly costing money.
+ */
+
+/** A feature model in the shape `fitLogistic` returns: `predict(x)` over a vector, and no support. */
+const timingSensitive = (names) => ({
+  kind: 'logistic',
+  predict: (x) => {
+    const i = names.indexOf('salaryWindow');
+    return 0.05 + 0.9 * (i >= 0 ? x[i] : 0);
+  },
+});
+
+test('a feature model prices two scheduled slots differently, which a GROUP BY cannot', () => {
+  const names = featureNames();
+  const scoreAction = createRecoveryScorer({
+    model: timingSensitive(names),
+    supportFrom: table(),
+    modelName: 'logistic',
+  });
+
+  const now = new Date('2026-08-24T09:30:00Z');
+  const priceSlot = (scheduledFor) =>
+    scoreAction({
+      diagnosis: { rootCause: 'INSUFFICIENT_FUNDS', physics: {} },
+      observed: { lossType: 'FAILED_PAYMENT', rail: 'CARD', amountPaise: 100_000 },
+      action: { kind: ActionKind.RETRY_SCHEDULED, scheduledFor },
+      context: { now, touchesUsed: 0 },
+    });
+
+  // Two slots that a (cause, kind) key merges by construction.
+  const a = priceSlot('2026-08-25T09:30:00Z');
+  const b = priceSlot('2026-08-31T09:30:00Z');
+
+  assert.equal(rowForScoring({ diagnosis: { rootCause: 'INSUFFICIENT_FUNDS' }, action: { kind: ActionKind.RETRY_SCHEDULED } }).actionKind,
+    ActionKind.RETRY_SCHEDULED);
+  assert.notEqual(a.p, b.p, 'the seam collapsed two slots to one probability again');
+
+  // And the audit trail must be able to say WHY, not merely that they differ. A number that moves
+  // for reasons the record cannot show is the same problem in a nicer costume.
+  assert.ok(a.timing, 'no timing evidence in the belief');
+  assert.notEqual(a.timing.salaryWindow, b.timing.salaryWindow);
+  assert.equal(a.timing.isScheduled, 1);
+});
+
+test('support comes from the table even when the probability does not', () => {
+  /**
+   * A logistic will return a confident number for a (cause, action) region it never saw — exactly what
+   * the stopping rules exist to catch, and the reason a naive arm swap is dangerous rather than
+   * merely wrong. Probability and support are answered by different instruments on purpose.
+   */
+  const names = featureNames();
+  const scoreAction = createRecoveryScorer({
+    model: timingSensitive(names),
+    supportFrom: table(),
+    modelName: 'logistic',
+  });
+  const seen = call(scoreAction, 'INSUFFICIENT_FUNDS', ActionKind.RETRY_NOW);
+  const never = call(scoreAction, 'NOBODY_HAS_SEEN_THIS', ActionKind.RETRY_NOW);
+
+  assert.equal(seen.support.state, 'SUPPORTED');
+  assert.equal(seen.support.rows, 20);
+  assert.equal(never.support.state, 'UNSEEN');
+  assert.ok(Number.isFinite(never.p), 'the model still has to produce a usable number');
+
+  // Omitting supportFrom for a model with no supportFor is the escalate-everything trap.
+  const unsupported = createRecoveryScorer({ model: timingSensitive(names), modelName: 'logistic' });
+  assert.equal(call(unsupported, 'INSUFFICIENT_FUNDS', ActionKind.RETRY_NOW).support.state, 'UNKNOWN');
+});
+
+test('a feature vector narrower than the fitted weights is refused, not silently dot-producted', () => {
+  /**
+   * The failure mode this forbids is unfalsifiable from the output: a vector one column short still
+   * produces a finite, plausible probability, just computed against the wrong columns. It would show
+   * up as a policy that is mysteriously slightly bad forever.
+   */
+  const wrongWidth = { kind: 'logistic', predict: () => 0.3, weights: new Array(featureNames().length + 1).fill(0.1) };
+  assert.throws(() => createRecoveryScorer({ model: wrongWidth, supportFrom: table() }), /width mismatch/);
+
+  const rightWidth = { kind: 'logistic', predict: () => 0.3, weights: new Array(featureNames().length).fill(0.1) };
+  assert.doesNotThrow(() => createRecoveryScorer({ model: rightWidth, supportFrom: table() }));
+});
+
+
+test('the shipped CLI wires a timing-aware arm, with support supplied separately', () => {
+  /**
+   * A SOURCE-LEVEL CHECK, AND IT IS THE ONLY TEST HERE THAT WOULD HAVE CAUGHT THE REAL BUG.
+   *
+   * Everything above proves the seam *can* carry a timing distinction. None of it proves the shipped
+   * entry point *does* — and for six days it did not: `decide-report.js` built its scorer from the
+   * lookup table while `npm run select-arm` printed `SELECTED: logistic`. Two defensible files, one
+   * undocumented divergence, no failing test. The engine was blind and the suite was green, which is
+   * the whole reason this assertion is worth its brittleness.
+   *
+   * Checking source text is a weaker instrument than checking behaviour, and it is used here for the
+   * same reason `boundary.test.js` and `armSelection.test.js` use it: the property is architectural.
+   * The alternative — fitting a real logistic and deciding a batch — costs seconds per run and would
+   * be measuring the fitter, not the wiring. If this test ever has to be relaxed, the thing to add is
+   * an end-to-end assertion that no two scheduled candidates tie, not a looser regex.
+   */
+  const src = readFileSync(new URL('../src/eval/cli/decide-report.js', import.meta.url), 'utf8');
+  const ctor = src.match(/createRecoveryScorer\(\{[\s\S]*?\}\)/);
+  assert.ok(ctor, 'decide-report.js no longer constructs a recovery scorer');
+
+  assert.match(ctor[0], /model:\s*logistic/, 'the CLI is not scoring with the arm select-arm selects');
+  assert.match(ctor[0], /supportFrom:\s*lookup/, 'support is not being supplied from the table');
+  assert.doesNotMatch(ctor[0], /model:\s*lookup\b/, 'the CLI reverted to a GROUP BY and cannot see the slot');
 });
 
 test('the constant scorer distinguishes its two baselines', () => {

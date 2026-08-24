@@ -1838,3 +1838,95 @@ was available the whole time.
 
 ---
 
+
+### Closing the second half: the engine now scores with the arm the selection procedure names
+
+The fix above made the ground truth care about *when* a retry lands. The engine still could not see
+it, because `decide-report.js` built its scorer from the `(diagnosed cause, action kind)` lookup table.
+Two `RETRY_SCHEDULED` candidates a week apart share a cause and a kind, so they shared a cell and one
+rate. Seven of them ranked at exactly ₹31.
+
+`src/agent/recoveryModel.js` now accepts either a row-based model (`predictRow`) or a feature model
+(`predict` over the vector from `buildFeatures`), and `decide-report.js` passes the logistic arm. The
+ranking separates immediately — ₹12, ₹11, ₹11, ₹10, ₹9, monotone in the slot, with
+`SWITCH_RAIL_NUDGE:WHATSAPP` now interleaving at rank 5 instead of sitting under a block of ties.
+
+**The engine was already correct; the seam was the lossy part.** `decide.js` had been calling
+`scoreAction` with `context.now = guard.effectiveAt` — the execution instant — since Day 6, with a
+docblock explaining that scoring at `now` "would price every scheduled retry as though it fired
+immediately and the timing effect would vanish from the decision while remaining visible in the
+training data." That is exactly what was happening, and the reason was one layer further out than the
+comment was looking. Guardrails, `features.js` and `decide.js` all handled timing correctly. The
+simulator was wrong (fixed above) and the seam threw the information away because the model on the
+other side had nowhere to put it. Four layers, two defects, and both in the places nobody was reading.
+
+**Probability and support now come from different models, and that is the design rather than a
+workaround.** A logistic returns a confident number for a `(cause, action)` region it never saw, which
+is precisely what the stopping rules exist to catch — so swapping the arm naively would have set
+`hasSupport` false and escalated the entire batch while the guardrail summary still read healthy. The
+logistic estimates `p`; the table reports how many rows back that region. Support answers a question
+about the *training data*, not about the estimator, so the coarse instrument is the right one for it.
+
+**What it changed in the batch.** ACT 159 → 152, STOP_PERMANENT 2 → 8, `NEGATIVE_EV` now closing eight
+cases worth ₹1,535 in total. The new arm prices small, old, hopeless cases below the cost of touching
+them. More stopping, not less, and on the cases where stopping is nearly free.
+
+#### The process failure, which is the part worth keeping
+
+This shipped wrong for six days behind a fully green suite, and I want to be precise about why rather
+than filing it as carelessness.
+
+The choice of `lookup` **was** documented, in `recoveryModel.js`, on good grounds: a 20-world paired
+sweep had found no arm measurably beating a GROUP BY, so shipping a booster would have rested the
+architecture claim on a difference the eval could not detect. That was right when written. It stopped
+being right when the simulator changed, because the sweep it rested on had been run in a world where
+the one thing a feature model can express and a GROUP BY cannot was switched off. **A justification can
+expire without anyone editing it, and nothing in the repo was watching the expiry date.** That is a
+more uncomfortable failure than a wrong decision, because the decision was defensible at every point.
+
+Earlier in this same entry I wrote that the fix's expensive half was void because the timing features
+already existed. They did — in `features.js`, consumed by the logistic and gbm arms, and not by the
+thing that ships. I checked whether the *feature* existed instead of what the *engine imported*, having
+already written down the warning that fixing only the loud half would be worse than today. The
+correction is left in place above rather than edited out.
+
+And the reason no test caught it: every test asserted the seam *could* carry a timing distinction, and
+none asserted that the shipped entry point *did*. So `test/recoveryModel.test.js` now ends with a
+source-level assertion on how `decide-report.js` constructs its scorer, verified by reverting the
+wiring and watching it fail. Its docblock states that source-text checks are a weaker instrument than
+behavioural ones and why the property being architectural makes it the right one here — the same
+argument `boundary.test.js` and `armSelection.test.js` already make.
+
+Suite 406 pass, 0 fail, 0 todo.
+
+**Still open, small:** the belief object now carries a `timing` field (`salaryWindow`, `delayDays`,
+`isScheduled`) so the audit trail can show *why* two slots differ rather than only that they do, but
+`explainDecision` does not print it yet. That belongs with the Day 7 audit trail.
+
+#### A t-statistic quoted without its sample size
+
+Closing the wiring left one loose end I only found by refusing to take a remembered number on trust.
+The new source-level test fails with the message "the CLI is not scoring with the arm select-arm
+selects" — a claim about what a *command prints*, so I ran the command rather than assuming it still
+said what it said on Day 6.
+
+It prints `SELECTED: logistic — BY TIEBREAK, NOT BY MEASUREMENT`, and the in-distribution regret
+leader is `gbm`, not the arm that ships. Both were already recorded accurately in the Day 6 entry and
+in VERIFY.md. But the shipped-arm docblock in `decide-report.js` said only "`npm run select-arm` prints
+`SELECTED: logistic`", which reads as a measured win to anyone who does not run it. Truncating a
+sentence at the clause that flatters you is not a wrong number, and it is not a lie; it is the way a
+labelled judgement call quietly becomes a finding. Both halves of the line are now in the docblock.
+
+The second half is worse and is mine. `recoveryModel.js` and `retryTiming.test.js` both quoted
+−0.42%/t = −1.36 in distribution and −1.51%/t = −2.46 under shift with no sample size attached. Those
+are the twenty-world figures. `npm run select-arm` defaults to **ten** worlds and prints −0.85%/t =
+−1.98 and −2.51%/t = −2.22. I confirmed the sweep is deterministic — two consecutive runs are
+byte-identical apart from the elapsed-time line — so a reader running the documented command gets
+numbers that do not match the source comments and has no way to tell which of us is wrong. VERIFY.md
+line 177 does say `--seeds=20`; the two source files did not, and a figure travels further than the
+page it was first printed on. Every citation now carries the flag that reproduces it.
+
+Note the conclusion is unchanged at either n: not separable in distribution, separable under shift.
+That is what makes this worth writing down rather than quietly fixing. The numbers agreed, so nothing
+would have broken — the failure mode is a reader losing confidence in figures that were correct all
+along, which costs more than an error a test can catch.

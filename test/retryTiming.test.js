@@ -26,9 +26,10 @@
  * the structural zero, the clamp, the tiebreak's meaning — and all of them still pass unchanged,
  * which is the more informative half of this file.
  *
- * ONE PIN IS DELIBERATELY STILL RED IN SPIRIT: the last test asserts that the shipped lookup key
- * cannot tell two slots apart. It passes, and what it documents is a live limitation, not a solved
- * one. See its docblock.
+ * ONE PIN LOOKS REDUNDANT AND IS NOT: the last test asserts that the lookup key cannot tell two slots
+ * apart. That was a live cost when it was written — the engine scored with that key — and closing it
+ * is what moved the engine onto the arm `select-arm` names. It stays because it pins the *reason* for
+ * that split. See its docblock.
  *
  * Run: node --test test/retryTiming.test.js
  */
@@ -226,33 +227,38 @@ test('the tiebreak picks the soonest legal slot, and that is arithmetic rather t
   assert.match(alphabetical[0], /2026-08-24T15:30/, 'the soonest slot sorts first');
 });
 
-test('the shipped lookup key still cannot distinguish two slots, and that is now a live cost', () => {
+test('the lookup key still cannot distinguish two slots, which is why it is no longer the scorer', () => {
   /**
-   * FIXING THE SIMULATOR WAS NECESSARY AND IS NOT SUFFICIENT — AND THIS TEST GOT MORE IMPORTANT,
-   * NOT LESS, THE MOMENT THE FIX LANDED.
+   * FIXING THE SIMULATOR WAS NECESSARY AND WAS NOT SUFFICIENT. THIS TEST RECORDS BOTH HALVES.
    *
-   * The lookup arm groups on (diagnosedCause, actionKind); `+6h` and `+3d` share a kind, so they
-   * land in one cell and receive one rate no matter how far apart their true rates are. Before the
+   * The lookup arm groups on (diagnosedCause, actionKind); `+6h` and `+3d` share a kind, so they land
+   * in one cell and receive one rate no matter how far apart their true rates are. Before the timing
    * fix that cost nothing, because the true rates were identical too. After it, the ground truth
-   * separates those slots by 25x and the lookup table still averages them — so the blindness now
-   * costs real simulated money rather than being a wash. This is precisely the "fixing only the
-   * loud half is worse than today" warning from the Day 6 log, and the fix does not resolve it; it
-   * activates it.
+   * separates those slots by 25x — so the blindness became live error rather than a wash, and the
+   * audit trail went on showing seven scheduled candidates tied to the paise.
    *
-   * What makes that a finding rather than a regression: `src/ml/features.js` already emits
-   * `salaryWindow`, `delayDays` and `isScheduled`, all computed from `action.scheduledFor`. So the
-   * logistic and gbm arms can represent the effect and the GROUP BY structurally cannot. Day 5
-   * concluded "ML does not measurably beat a GROUP BY here" (−0.32% ± 0.29%, t = −1.09) — and that
-   * was measured against a ground truth in which the one thing ML could express and a GROUP BY
-   * could not had been switched off. Whether the conclusion survives is the pre-registered question,
-   * not an assumption; the prediction and its kill condition were written down before the sweep was
-   * re-run, and the answer is recorded in ENGINEERING_LOG.md either way.
+   * That was the "fixing only the loud half is worse than today" warning from the Day 6 log coming
+   * true. It is closed now, and NOT by changing this key: the key is fine for what it is still used
+   * for. `decide-report.js` scores with the logistic arm — the one `npm run select-arm` names, and the
+   * one that consumes `salaryWindow`, `delayDays` and `isScheduled` from `src/ml/features.js` — while
+   * the table continues to answer the separate question of how many rows back a region of the problem.
+   * Probability and support are different questions and now have different instruments.
+   *
+   * So what this test pins is the *reason* for that split, permanently: the key genuinely cannot see
+   * the slot, and the gap it has to swallow is genuinely large. If the timing fix is ever reverted the
+   * second assertion fails; if someone re-points the engine at this key, the source-level assertion in
+   * `test/recoveryModel.test.js` fails. Day 5's conclusion that "ML does not measurably beat a GROUP
+   * BY here" was measured before any of this and survives only in distribution (−0.42%, t = −1.36);
+   * under distribution shift it does not (−1.51%, t = −2.46). Both figures are the twenty-world sweep
+   * (`node src/eval/cli/select-arm.js --seeds=20`), which was the pre-registered design; the default
+   * ten-world run prints −0.85%/t = −1.98 and −2.51%/t = −2.22 instead. Same conclusion either way,
+   * but the n belongs next to the t or the two runs look like a contradiction.
    */
   const key = (r) => `${r.diagnosedCause}|${r.actionKind}`;
   const rowFor = (action) => ({ diagnosedCause: 'INSUFFICIENT_FUNDS', actionKind: action.kind });
   assert.equal(key(rowFor(BEFORE_FUNDS)), key(rowFor(JUST_AFTER)), 'the key already separates slots');
 
-  // The gap the key has to swallow, stated as a number so this test fails loudly if the fix is
+  // The gap the key would have to swallow, stated as a number so this fails loudly if the fix is
   // ever reverted and the limitation quietly becomes free again.
   assert.ok(price(JUST_AFTER).p > price(BEFORE_FUNDS).p * 5, 'the two slots the key merges are no longer far apart');
 });
