@@ -192,6 +192,50 @@ test('a structural zero stays zero however cleverly it is scheduled', () => {
   }
 });
 
+test('a retry on an invoice that was never charged is a structural zero too (#68)', () => {
+  /**
+   * FOUND BY `probe-mispricing.mjs`, NOT BY READING THIS FILE — and this file is exactly where it
+   * should have been caught, which is the lesson worth keeping.
+   *
+   * The sibling test above pins one kind of structural zero: a dead INSTRUMENT. This pins a
+   * different kind — a dead ACTION. `actionFit` is indexed by payer type, so it can say "this
+   * person pays when reminded" but it has no way to say "this action is meaningless for this loss
+   * type." An OVERDUE_INVOICE is not a failed charge; there is nothing to re-present. Yet a
+   * WILL_PAY_IF_REMINDED payer with an unpaid invoice picked up `actionFit[...][RETRY_NOW] = 0.50`
+   * and recovered at a MEASURED 18.06% (n=1113) and 18.69% (n=3339) from an action that cannot
+   * physically occur — while `ROOT_CAUSES.INVOICE_FORGOTTEN` had said `retryCanSucceed: false,
+   * // nothing to retry; there is no failed charge` the whole time. The taxonomy knew. The physics
+   * did not.
+   *
+   * WHY IT MATTERED RATHER THAN JUST BEING WRONG: a retry carries no channel cost and no patience
+   * penalty, so it is the cheapest action in the model. An 18% free lottery ticket on the largest
+   * loss type is precisely what an EV-maximiser spends its batch on. The recovery was real in the
+   * metrics and impossible in the world — the eleventh defect here that flattered the headline.
+   *
+   * The second half of this test is the half that keeps the fix honest: the actions that CAN
+   * collect an unpaid invoice must still work, or "fixed" would just mean "invoices are now
+   * unrecoverable", which would depress the numbers for an equally wrong reason.
+   */
+  const invoice = { ...EVENT, lossType: 'OVERDUE_INVOICE' };
+  const reminder = { payerType: PayerType.WILL_PAY_IF_REMINDED };
+  const priceInvoice = (action) =>
+    recoveryProbability({ action, latent: reminder, event: invoice, now: NOW, touchesUsed: 0, assumptions: A });
+
+  for (const action of [{ kind: ActionKind.RETRY_NOW }, BEFORE_FUNDS, JUST_AFTER, WINDOW_GONE]) {
+    const { p, breakdown } = priceInvoice(action);
+    assert.equal(p, 0, `${actionSignature(action)} re-presented a charge that was never made`);
+    assert.match(breakdown.reason, /structural zero/);
+  }
+
+  // The same payer, the same invoice, an action that is actually about collecting it.
+  const { p: linkP } = priceInvoice({ kind: ActionKind.SEND_LINK, channel: 'EMAIL' });
+  assert.ok(linkP > 0.1, `a reminder-responsive payer should still be reachable by link: ${linkP}`);
+
+  // And the guard must be about the LOSS TYPE, not about retries in general.
+  const { p: failedP } = price({ kind: ActionKind.RETRY_NOW }, reminder);
+  assert.ok(failedP > 0, `a genuine failed payment is still retryable: ${failedP}`);
+});
+
 test('scheduling cannot exceed a probability of 1 once the boost applies', () => {
   // 0.80 at the baseline 2.4x leaves little headroom, and the sweep goes to 3.2x. An unclamped
   // multiplier would produce a probability above 1, which would then be spent as expected gross

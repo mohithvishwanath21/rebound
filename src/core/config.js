@@ -210,6 +210,26 @@ export const POLICY = {
   minEvToActPaise: rupeesToPaise(2),
 
   /**
+   * How many standard errors of its own EV an action must clear, on top of the flat floor above.
+   *
+   * The paragraph above says the flat floor exists because "the band near zero is where the model is
+   * least trustworthy". That was an argument about NOISE, and a constant cannot track noise: the
+   * standard error of an expected value is `sigma(p) x amount x margin`, so it grows with the stake
+   * and shrinks with the number of comparable rows the model saw. `probe-evbar.mjs` measured the
+   * consequence and `actionThresholdPaise` carries the derivation.
+   *
+   * k = 1 is deliberately the value the original docstring already implied — "real headroom" over
+   * one standard error — rather than a value chosen because it made the recovered total look good.
+   * Choosing k by trying values and keeping the best would be selecting a policy on the outcome it
+   * is meant to be judged by. It is swept as an assumption in #58 instead.
+   *
+   * SETTING IT TO 0 RESTORES THE OLD FLAT BAR EXACTLY, and that is a feature: the two policies are
+   * then an A/B from a single code state, so the comparison holds the world, the model, the luck and
+   * the clock fixed and moves only the bar.
+   */
+  evBarSigmaK: 1,
+
+  /**
    * Candidate retry times offered to the scorer, in hours from now.
    * The scorer picks among these; it does not invent arbitrary timestamps. A small
    * discrete set keeps decisions comparable and the audit trail readable.

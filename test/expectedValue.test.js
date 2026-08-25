@@ -31,6 +31,7 @@ import {
   marginFor,
   channelCostPaise,
   actionThresholdPaise,
+  evStandardErrorPaise,
   describeAssumptions,
 } from '../src/agent/expectedValue.js';
 import { ActionKind, Channel, ACTION_META } from '../src/core/actions.js';
@@ -478,4 +479,87 @@ test('costs are injectable, so the sensitivity sweep can perturb them without mu
   });
   assert.equal(r.components.expectedFailurePenaltyPaise, 200, '(1 - 0.5) x 400');
   assert.equal(COSTS.failedRetryPenaltyPaise, 200, 'the real config must be untouched');
+});
+
+// =============================================================================================
+// THE SUPPORT-SCALED BAR (#52) — every number below is hand-computed
+// =============================================================================================
+
+test('sigma(EV) is the binomial standard error times the stake, to the paise', () => {
+  /**
+   * BY HAND, with p = 0.12 over 30 rows on a ₹1,000 case at margin 1.0:
+   *
+   *   p(1-p)          = 0.12 x 0.88            = 0.1056
+   *   /(rows + 2)     = 0.1056 / 32            = 0.0033
+   *   sigma(p)        = sqrt(0.0033)           = 0.05744562646...
+   *   sigma(EV)       = 0.05744562646 x 100000 = 5744.5626... paise
+   *
+   * The `+2` is the pseudo-count, and using `rows` alone would give 5936.6 — a 3.3% difference here
+   * and an unbounded one on a cell of three identical rows, where the bare form reports sigma = 0.
+   */
+  const sigma = evStandardErrorPaise({ p: 0.12, rows: 30, amountPaise: 100_000, marginFraction: 1 });
+  assert.ok(Math.abs(sigma - 5744.5626466) < 1e-6, `expected 5744.5626 paise, got ${sigma}`);
+  assert.equal(actionThresholdPaise({ minEvToActPaise: 200, evBarSigmaK: 1 }, { p: 0.12, rows: 30, amountPaise: 100_000, marginFraction: 1 }), 5745);
+});
+
+test('the bar scales exactly with the stake, so EV/sigma is amount-invariant', () => {
+  /**
+   * THIS TEST PINS THE FINDING THAT CORRECTED MY OWN REASONING. I predicted the flat bar would fail
+   * worst on large amounts. It cannot: EV and sigma(EV) are both linear in the amount, so their
+   * ratio — the quantity that actually decides whether an action clears a sigma bar — does not
+   * depend on the amount at all. `probe-evbar.mjs` measured the largest quartile as the SAFEST.
+   *
+   * If a future change makes the bar sublinear in the amount, that finding silently stops holding
+   * and every conclusion drawn from it becomes wrong. Hence an equality, not an inequality.
+   */
+  const evidence = (amountPaise) => ({ p: 0.12, rows: 30, amountPaise, marginFraction: 1 });
+  const small = evStandardErrorPaise(evidence(100_000));
+  const large = evStandardErrorPaise(evidence(1_000_000));
+  assert.ok(Math.abs(large - small * 10) < 1e-9, `sigma must be linear in the stake: ${large} vs ${small * 10}`);
+
+  // And the ratio is p / sigma(p) = 0.12 / 0.05744562646 = 2.0889..., identical at both stakes.
+  const ratio = (amountPaise) => (0.12 * amountPaise) / evStandardErrorPaise(evidence(amountPaise));
+  assert.ok(Math.abs(ratio(100_000) - ratio(1_000_000)) < 1e-9, 'EV/sigma must be amount-invariant');
+  assert.ok(Math.abs(ratio(100_000) - 2.0889318714) < 1e-8, `expected 2.08893, got ${ratio(100_000)}`);
+});
+
+test('support, not amount, is what moves the bar', () => {
+  // Same p, same stake, 30 rows vs 900. Hand-computed: sqrt(0.1056/902) x 100000 = 1082.0035 paise.
+  const thin = evStandardErrorPaise({ p: 0.12, rows: 30, amountPaise: 100_000, marginFraction: 1 });
+  const solid = evStandardErrorPaise({ p: 0.12, rows: 900, amountPaise: 100_000, marginFraction: 1 });
+  assert.ok(Math.abs(solid - 1082.0035616) < 1e-6, `expected 1082.0036 paise, got ${solid}`);
+  assert.ok(thin > solid * 5, `a thin cell must face a much higher bar: ${thin} vs ${solid}`);
+});
+
+test('an unseen cell falls back to the flat floor rather than inventing a standard error', () => {
+  /**
+   * The architectural boundary, pinned. `rows = 0` means the probability is the global base rate and
+   * its error is BIAS, which a standard error cannot express. Returning a sigma here produced a bar
+   * of roughly a fifth of the amount, which turned AWAIT_APPROVAL into ESCALATE_HUMAN and disabled
+   * the approval envelope — see the docblock on `evStandardErrorPaise`. Unseen beliefs belong to
+   * `APR_UNSUPPORTED_BELIEF`, and this assertion is what keeps them there.
+   */
+  const policy = { minEvToActPaise: 200, evBarSigmaK: 1 };
+  assert.equal(evStandardErrorPaise({ p: 0.12, rows: 0, amountPaise: 5_000_000, marginFraction: 1 }), null);
+  assert.equal(actionThresholdPaise(policy, { p: 0.12, rows: 0, amountPaise: 5_000_000, marginFraction: 1 }), 200);
+  // An arm that cannot report support at all is treated the same way, for the same reason.
+  assert.equal(actionThresholdPaise(policy, { p: 0.12, amountPaise: 5_000_000, marginFraction: 1 }), 200);
+});
+
+test('k = 0 restores the old flat bar exactly, which is what makes the A/B possible', () => {
+  /**
+   * Not a legacy escape hatch. The comparison in ENGINEERING_LOG holds the world, the model, the
+   * luck and the clock fixed and moves only `evBarSigmaK`, and that is only a clean experiment if
+   * k = 0 reproduces the previous policy to the paise rather than approximately.
+   */
+  const evidence = { p: 0.12, rows: 30, amountPaise: 100_000, marginFraction: 1 };
+  assert.equal(actionThresholdPaise({ minEvToActPaise: 200, evBarSigmaK: 0 }, evidence), 200);
+  assert.equal(actionThresholdPaise({ minEvToActPaise: 200 }, evidence), 200, 'a policy with no k set must not opt in silently');
+  assert.equal(actionThresholdPaise(POLICY), POLICY.minEvToActPaise, 'called without evidence, the shipped policy still reports its floor');
+});
+
+test('the floor still binds when sigma is tiny', () => {
+  // A well-observed cell on a ₹20 case: sqrt(0.1056/10002) x 2000 = 6.5 paise, under the ₹2 floor.
+  const bar = actionThresholdPaise({ minEvToActPaise: 200, evBarSigmaK: 1 }, { p: 0.12, rows: 10_000, amountPaise: 2_000, marginFraction: 1 });
+  assert.equal(bar, 200, 'max(floor, k x sigma) must not let a small case act on 7 paise of headroom');
 });

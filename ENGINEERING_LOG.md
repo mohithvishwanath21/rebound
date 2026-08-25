@@ -1984,6 +1984,11 @@ the double call production's own validator, which costs one line and is now what
 
 ## [Day 7] The recovery rate was true, and its denominator was doing all the work
 
+> **Figures in this entry are g100 and are HISTORICAL.** ₹4,311 was later shown to be spin-loop-depressed
+> by roughly 19x (#67) and the world has since changed four more times (#64 g120, #65/#66 g130, #68 g140).
+> **Do not quote ₹4,311 or ₹11,20,352 as current.** The reasoning about denominators is the durable part
+> and it is why this entry stays.
+
 **Symptom:** Not a crash. The first clean run reported ₹4,311 recovered against ₹11,20,352 at risk —
 0.4%. I typed "0.4% recovery rate" into the report, looked at it, and could not tell whether that
 number was about the policy at all.
@@ -2209,6 +2214,11 @@ self-recovering exposure by cycle 7            ₹1,21,056
 total portfolio exposure                       ₹11,20,352
 agent recovery, same world (Day 7 figure)          ₹4,311
 ```
+
+> **All eight numbers above are g100 and HISTORICAL** — kept because they are the evidence for the
+> *diagnosis*, which is what this entry is about. The self-recovery timing defect they exposed was fixed,
+> and the horizon was later moved from 8 cycles to 21 (#62) precisely because 8 cycles could not see the
+> phenomenon. Do not quote them as current; section 12 of VERIFY.md has the g140 figures.
 
 ₹1,07,871 resolves itself at cycle 0, before any policy acts. That is 9.6% of the whole portfolio and
 **25 times** what the agent recovers. Had I wired self-recovery in without looking, `B0_DO_NOTHING`
@@ -2877,3 +2887,297 @@ itself, by importing `effectiveAt` from the guardrail engine rather than restati
    it only if the number disappoints.
 5. **The prediction most likely to be wrong:** that this is small. I have said "probably redundant"
    about the timing columns twice now, and the retry-timing defect was not small either time.
+
+### Grading them, on a fixed generator
+
+The A/B is `git stash push src/ml/features.js src/agent/decide.js test/decide.test.js`, run, pop, run.
+Both halves sit on generator g130 and commit `e99c28d`, so #65's rail fix cannot leak into #51's column.
+TRAIN seeds 1,2,3 at count 80. Incremental recovery, which is the only money column worth quoting:
+
+| world  | before #51  | after #51   | gross before | gross after |
+|--------|-------------|-------------|--------------|-------------|
+| seed 1 | Rs 5,61,016 | Rs 5,61,016 | Rs 6,34,534  | Rs 5,61,226 |
+| seed 2 | Rs 42,108   | Rs 42,108   | Rs 43,456    | Rs 43,456   |
+| seed 3 | Rs 1,74,521 | Rs 50,799   | Rs 1,74,521  | Rs 50,799   |
+
+**Prediction 1 — `delayDays` stops being structurally zero at serving. HELD, and it is now checked by a
+computation rather than a claim.** `probe-coefficients.js` featurises the same scheduled action under
+both conventions and prints `was 0.000 under the old convention, now 2.000`. The block used to carry
+hardcoded status strings, which meant it would have gone on announcing the defect for as long as nobody
+edited the file — a probe that keeps reporting a failure after the failure is fixed is worse than no
+probe, because it is trusted. The strings are gone; the statuses are derived.
+
+**Prediction 2 — the model changes. HELD.** Decision counts moved in all three worlds (3715 to 3767,
+5299 to 5171, 5347 to 4069) and contact counts with them (208 to 214, 285 to 279, 289 to 254). The
+policy is demonstrably choosing differently.
+
+**Prediction 3 — money goes UP by less than 10%. FALSIFIED, in the direction and in the size.** It went
+DOWN Rs 1,23,722, which is 16% of the three-world pool. Sign count 0 up, 1 down, 2 tied to the paise.
+
+**Prediction 4 — a DOWN result would not falsify the fix.** This is now the load-bearing prediction, so
+it deserves more than being cashed in. The pre-registration is what makes it usable at all: I wrote down
+before seeing the number that a decline would be a correction, and the reason I gave then still stands
+now — `responseModel.js` draws the label against landing-time age, so training on decision-time age fed
+the model a systematically YOUNGER case than the one its label described. That is an optimistic view of
+every scheduled retry, and losing an optimistic view costs money by construction. I am keeping the fix.
+But I am not claiming the decline is *good*: it is the price of a correct feature, and the honest
+summary is that Rebound was previously being flattered on scheduled retries by about Rs 1.2 lakh across
+three worlds.
+
+**Prediction 5 — "the most likely thing to be wrong is that this is small." HELD, and it caught me a
+third time.** A 16% pooled swing is not redundancy.
+
+### The finding the predictions did not anticipate: I named the defect after the wrong column
+
+`delayDays` carries a weight of -0.0014 over a training range of [0, 9] — a swing of -0.0125 log-odds
+across its entire span. Nothing that small moves an argmax, let alone Rs 1.2 lakh. The column the fix
+was named after is worthless, and unpinning it changed essentially nothing.
+
+The money came from the other half. `ageDays` has weight -0.4316 over [0.013, 2.746], a swing of -1.18
+log-odds, and `ageDays` is the column whose TRAINING clock was misaligned. At serving it was already
+landing-based both before and after — the probe confirms it as `consistent across both conventions`.
+So the causal chain is: training-side age becomes correct, the fitted age decay sharpens, stale cases
+score lower, their EV falls under the Rs 2 bar sooner, the agent stops earlier, and in seed 3 — a world
+where persistence was paying — stopping earlier cost Rs 1,23,722. Seed 3's decision count fell by 1,278.
+
+Two things follow. First, Day 7's framing of this as "two coherent designs needing a choice" was wrong
+twice over: there was no choice (the label had already picked), and the column I thought the choice was
+about was inert either way. Second, the seed-3 decline is not really a story about features at all. It
+is the Rs 2 EV floor deciding when to give up, now that it is being fed an accurate age. That is #52,
+and #51 has just handed it a measured motivation instead of a suspicion.
+
+**What I am NOT claiming.** n=3 with one mover is not an effect size. I am not running twenty worlds to
+put an interval on it, because the mechanism is already identified and buying power would only sharpen a
+number I have no decision resting on — the fix stays either way, on correctness grounds. The number that
+does need to be re-measured on twenty worlds is the five-arm headline, and that is owed for g130
+regardless of #51.
+
+### A second, unlooked-for confirmation of the gross-vs-incremental gap
+
+Seed 1's gross fell Rs 73,518 while its incremental held identical to the paise, and seed 2's gross did
+not move at all. So the entire seed-1 gross decline was credit Rebound had been collecting for cases
+that would have recovered on their own. This was not designed as a test of the counterfactual machinery,
+which is what makes it worth writing down: an independent change reduced the gross by exactly the amount
+that the incremental column was already refusing to count. Quote incremental.
+
+## #52 and #63, settled by measurement — and they were one defect, not two
+
+Two tasks were open: "#52 the agent retries hopeless instruments because the EV bar is only ₹2" and
+"#63 the fitted model under-predicts 6x and mis-ranks within cases". Both were written from
+suspicion. Measuring them first is what stopped me from fixing either one as stated.
+
+### The 6x claim does not survive, and I am retracting it
+
+`probe-mispricing.mjs` builds every (diagnosed cause × action kind) cell over three TRAIN worlds and
+puts the EMPIRICAL recovery rate — a count of Bernoulli outcomes the simulator drew — next to the
+calibrated logistic's mean prediction on the same rows. Pooled over the 66 cells with n ≥ 30:
+
+    empirical 9.93%    predicted 9.92%    ratio 1.00x
+
+There is no 6x pooled under-prediction. The figure in the task title was wrong, and it was wrong in
+the flattering direction for the task: a model that under-predicts by 6x is a dramatic finding, and
+having written it down I would have gone looking for a fix rather than for the number. What survives
+of #63 is narrower and real — WITHIN-cell mis-ranking, worst at `INVOICE_DISPUTED|ESCALATE_HUMAN`
+where the empirical 22.81% is priced at 10.17% on n=114.
+
+### The ₹2 bar's real failure is not the one I argued for either
+
+My argument was: sigma(EV) = sigma(p) × amount × margin scales with the stake, so a flat bar demands
+shrinking statistical headroom as the case gets bigger, and the failure will concentrate in large
+amounts. The first half is true. The conclusion is false, and the arithmetic that kills it is one
+line: EV and sigma(EV) are BOTH linear in the amount, so
+
+    EV / sigma(EV)  =  p / sigma(p)
+
+which does not contain the amount at all. `probe-evbar.mjs` measured the largest quartile as the
+SAFEST. Every bit of the problem lives in sigma(p) — that is, in how many comparable rows the model
+saw. So the noise bar and the support gate are algebraically the same instrument, arrived at from two
+directions, and 12 of 12 unsupported choices sat below one standard error against 7 of 207 supported
+ones.
+
+That is why the fix scales the bar by SUPPORT rather than by amount, and why unseen cells are
+deliberately left out of it: with rows = 0 the error is bias, not variance, and a standard error
+cannot express bias. Those already go to a human via `APR_UNSUPPORTED_BELIEF`. Building a second
+mechanism for them would have been two rules fighting over one population — which is exactly what
+`probe-evbar.mjs`'s third prediction suspected was happening.
+
+### Pre-registered predictions for the k = 0 vs k = 1 A/B
+
+Written before running. Five seeds, TEST split, full 21-cycle horizon, one commit, one generator
+version (g140), `--ev-bar-sigma-k` the only thing that moves.
+
+P1. ACTIONS FALL. The bar is `max(floor, k·sigma)`, so it can only rise; strictly fewer actions can
+    clear it. Direction is certain, so the prediction is the size: between 10% and 40% fewer.
+P2. INCREMENTAL RECOVERY ALSO FALLS, but by proportionally LESS than the action count. If money falls
+    by a larger percentage than actions do, the bar is cutting good actions and I should revert it —
+    this is the pre-committed kill condition, not a hoped-for result.
+P3. RECOVERY PER ACTION RISES. The sharpest test of the actual claim: if the actions removed were
+    noise-fitting, what remains must be better per attempt. If this is flat, the bar is just a volume
+    knob wearing a statistical argument.
+P4. THE SIGN COUNT vs B3 DOES NOT GET WORSE — still at least 4 of 5 seeds. Closing a noise gap should
+    not cost the comparison against the fixed ladder.
+P5. THE B2 GAP GETS WORSE, i.e. below the 0.79x already recorded. B2 beats Rebound on VOLUME, and
+    this change reduces our volume further, so the mechanism predicts bad news here. Stated as a
+    prediction precisely because it is unflattering and therefore worth being wrong about.
+
+### And one prediction about #68 rather than the bar
+
+g140 also removes the phantom invoice retries (#68 below). All arms lose some recovery, but Rebound
+should lose the MOST in relative terms, because an EV-maximiser is exactly the policy that spends its
+batch on a free 18% lottery ticket while a fixed ladder does not know the ticket exists.
+
+P6. REBOUND's RATIO vs B3 FALLS FROM g130 TO g140. Any part of the old headline that came from
+    retrying charges that were never made should be handed back, and it should be handed back by us
+    more than by the baselines.
+
+### Grading the six predictions
+
+Both arms of the A/B ran at one commit on g140, 5 seeds × 80 TEST cases × 21 cycles, 59s and 62s.
+`B3_FIXED_LADDER` came out BIT-IDENTICAL across the two runs — every one of its 40-odd counters
+unchanged in all five seeds — which is the confound check that makes the rest of the table readable:
+only Rebound's policy moved.
+
+    seed   incremental k=0   incremental k=1     delta   attempts k0 -> k1   paise per attempt
+       1        ₹4,59,987         ₹4,59,987          0        244 -> 226        1,885 -> 2,035
+       2          ₹24,908           ₹24,908          0        270 -> 255           92 ->    98
+       3          ₹94,458           ₹94,458          0        349 -> 338          271 ->   279
+       4          ₹40,743           ₹40,743          0        320 -> 314          127 ->   130
+       5           ₹7,358            ₹7,358          0        260 -> 246           28 ->    30
+    POOL       ₹6,27,454         ₹6,27,454          0       1443 -> 1379          435 ->   455
+
+P1 FALSIFIED. I predicted 10-40% fewer actions. Measured: 4.4%. The direction was guaranteed by
+   construction so the only content in the prediction was the size, and I was off by more than a
+   factor of two on the low end. The bar binds on far fewer actions than I expected, because
+   `p/sigma(p)` is around 11 for a well-supported cell and the sigma term simply never binds there.
+
+P2 HELD, and this is the result the whole task turns on. Money did not fall by less than the action
+   count — it did not fall AT ALL. Identical to the paise in all five worlds. 64 actions removed,
+   zero rupees lost. The kill condition never came close to triggering.
+
+P3 HELD. 435 -> 455 paise recovered per attempt pooled, +4.6%.
+
+P4 HELD. Sign count against B3 unchanged, 3 of 5 either way.
+
+P5 FALSIFIED. I predicted the B2 gap would widen because B2 wins on volume and this cuts our volume.
+   The pooled incremental ratio is 0.7136x in BOTH arms, and the net mean moved by ₹4.60 on a mean of
+   -₹44,653. Flat. The reasoning was wrong in an instructive way: the volume B2 has and we do not is
+   not made of the actions this bar removes.
+
+### "Zero rupees lost" is a suspicious number, so here is the mechanism
+
+Identical-to-the-paise has been a symptom of a wiring bug twice in this project, so I did not accept
+it. The counters settle it, and they settle it without a new run:
+
+    seed:            1      2      3      4      5
+    retries removed  13      7      3      3     10
+    failed retries
+        removed      13      7      3      3     10
+
+Every retry the support-scaled bar declined was a retry that FAILED. Five seeds, exact match in each.
+That is not a coincidence and it is not luck holding still — it is what the bar is for. The 28 removed
+messages likewise recovered nothing. So the honest one-line claim is: **the bar removed 4.4% of
+actions and none of the money, because what it removed was 36 failed retries and 28 messages that
+recovered nothing.**
+
+### The unlooked-for cost: declining to act is not free
+
+`netPaise` moved in all five seeds, and not all one way: +₹27.75, +₹24.80, **-₹108.00**, +₹7.05,
++₹25.40. Seed 3 got worse, and it is the same seed that lost money to the #51 fix.
+
+The reason is in two other counters. `stoppedCases` rose in every seed (+1, +6, +4, +6, +2) and
+`unresolvedCases` fell in every seed (-1, -6, -6, -6, -2). When a marginal action no longer clears its
+bar, the case does not evaporate — it takes a different exit, and some of those exits go through a
+person at ₹60 a look. In seed 3 two extra escalations at ₹6,000 paise each outweighed the ₹1,200 of
+saved retry penalties, which is almost exactly the ₹108 gap.
+
+I did not predict this and it is the most useful thing in the run, because it names the real trade:
+a noise bar converts *cheap wrong actions* into *human attention*, and human attention has a price.
+It also produced a benefit I did not predict — unresolved cases fell in every single world, so the
+agent now reaches a definite, auditable disposition on more of the batch than it did before.
+
+### The g140 headline, and the part of it that got worse
+
+Shipped policy (k = 1), 5 seeds, TEST, incremental:
+
+    vs B3_FIXED_LADDER   pooled 1.8728x   sign count 3 up / 2 down   mean +₹58,483
+                         per world: +₹3,86,987, +₹9,921, -₹83,742, +₹24,049, -₹21,057
+    vs B2_AGGRESSIVE     pooled 0.7136x   sign count 2 up / 3 down   mean -₹50,358
+
+P6 CONFIRMED, and it costs us the nicer sentence. The previously recorded sign count against B3 was
+4 of 5; on g140 it is 3 of 5, and the loss to B2 deepened from a recorded 0.79x to 0.7136x. I am NOT
+attributing that cleanly to #68 alone — g140 carries #68 and the run also carries #51, and I did not
+isolate them, so the honest attribution is "the last two correctness fixes together". What I will say
+without hedging is the direction: removing recovery that came from retrying charges that were never
+made made our numbers worse, we handed it back, and the baselines did not have to hand back as much
+because a fixed ladder never knew the free lottery ticket existed.
+
+**So the claim to make out loud is the weaker true one.** Rebound beats the fixed ladder in 3 of 5
+worlds and loses to the aggressive baseline in 3 of 5. B2 buys its win with volume — and the guardrail
+and quiet-hours counters are where that volume shows up as something a merchant would not sign off on.
+That is an argument about compliance, not about recovered rupees, and it should be made as one.
+
+### Substantiating the compliance claim, because I wrote it before I checked it
+
+I typed "B2 buys its win with volume ... something a merchant would not sign off on" and then realised
+I had asserted it rather than measured it. Pooled over the five k=1 worlds:
+
+    counter                        B1_NAIVE    B2_AGGR    B3_LADDER    REBOUND
+    attempts                            945      6,609        1,610      1,379
+    messages                              0      5,664          688        691
+    quiet-hours messages                  0      2,836            0          0
+    contact-cap breaches                  0      5,095            0          0
+    distinct customers breached           0        278            0          0
+    worst contacts in one window          0         45            2          2
+    worst contacts over the run           0         58            4          4
+    incremental recovered           ₹77,053   ₹8,79,244     ₹3,35,037  ₹6,27,454
+
+The claim survives, and more cleanly than I expected. B2 recovers 1.40x our money using 4.8x our
+actions, and gets there by sending 2,836 messages inside quiet hours and breaching the per-customer
+contact cap 5,095 times across 278 distinct customers — one of whom it contacted 58 times. Rebound and
+the fixed ladder both record zero on every one of those counters.
+
+Per attempt, incremental: B1 8,154 paise, B2 13,304, B3 20,810, **Rebound 45,501**. So we are 3.42x
+more efficient per action than B2 **and we lose to it on the total.** Both halves of that sentence have
+to be said together, and the second half is the one to say first, because a judge who finds the loss
+themselves has been told a different story than one who is handed it.
+
+The cleaner claim is the one against the compliant baseline, and it is clean on every basis at once:
+**Rebound recovers 1.8728x B3's incremental money using 14% FEWER attempts** (1,379 vs 1,610), which is
+2.19x the money per action. That sentence needs no caveat about rule-breaking, no argument about whether
+compliance counts, and no choice of denominator to make it work — which is what makes it the headline
+rather than the B2 comparison.
+
+One honest caveat on the compliance table: `absoluteBreaches` is 0 for B2 as well, so B2 is not
+breaking the hard ceiling — it is repeatedly breaking the per-customer window cap that sits below it.
+That is a meaningful distinction and it belongs next to the number rather than in a footnote.
+
+### The basis moves the two comparisons in OPPOSITE directions, and I nearly mislabelled it
+
+Re-deriving the per-world figures from the run JSON rather than from my own notes caught a
+mislabelling before it reached a write-up. The five per-world differences I had written down summed to
+Rs 3,16,158, but the pooled incremental difference is Rs 2,92,417 — a Rs 23,741 gap. The explanation is
+not an arithmetic slip: **the per-world list was GROSS recovered and the pooled figure was INCREMENTAL.**
+Two bases, one label. `rebound_incremental_vs_gross` exists precisely to stop this and it still nearly
+happened, which says the guard has to be "re-derive from the artefact", not "remember the rule".
+
+Having both bases side by side then showed something I had assumed away. The counterfactual deduction
+is not a uniform haircut — arms differ in how much of their recovery overlaps the set of cases that
+would have self-recovered anyway:
+
+    arm         gross        incremental    deduction    as % of gross
+    B2       Rs 9,29,259     Rs 8,79,244     Rs 50,015        5.4%
+    Rebound  Rs 7,01,973     Rs 6,27,454     Rs 74,519       10.6%
+    B3       Rs 3,85,815     Rs 3,35,037     Rs 50,778       13.2%
+
+So moving to the incremental basis moves our two comparisons in OPPOSITE directions: vs B3 we improve
+(1.8195x gross -> 1.8728x incremental, because B3 loses the largest share) and vs B2 we get worse
+(0.7554x -> 0.7136x, because B2 loses the smallest). There is no "conservative basis" that makes both
+comparisons pessimistic, so **picking a basis per comparison would be picking a winner.** Quote
+incremental for both, which is what the harness does.
+
+The mechanism behind B2's small deduction is worth saying because it is a point in B2's favour:
+brute force reaches cases that would never have paid on their own, so less of its total is money the
+merchant would have received anyway. Rebound gives up the largest absolute deduction of any arm —
+Rs 74,519, a tenth of its gross — because a meaningful slice of what it recovers, the customer was
+going to pay regardless. That is the least flattering number in this section and it is the one most
+worth computing, because almost no submission computes it at all.

@@ -47,7 +47,7 @@ import { GUARDRAILS, POLICY, POLICY_ARMS } from '../core/config.js';
 import { ActionKind, actionSignature, enumerateCandidateActions, MONEY_MOVING, CUSTOMER_CONTACTING, Channel } from '../core/actions.js';
 import { formatINR } from '../core/money.js';
 import { checkGuardrails, normaliseCaseState, Verdict } from './guardrails.js';
-import { expectedValue, actionThresholdPaise, marginFor } from './expectedValue.js';
+import { expectedValue, actionThresholdPaise, marginFor, evStandardErrorPaise } from './expectedValue.js';
 import { decideDisposition, Disposition, classifySupport, CALIBRATION_NOTE, POLICY_GROUNDED_STOPS } from './stopping.js';
 
 const HOUR_MS = 3_600_000;
@@ -353,13 +353,21 @@ export function decideForCase({
      * proximity of the FUTURE slot; scoring it at `now` would price every scheduled retry as
      * though it fired immediately and the timing effect — the highest-leverage distinction in
      * the model — would vanish from the decision while remaining visible in the training data.
+     *
+     * WHAT GETS PASSED IS THE DECISION INSTANT, AND THAT IS NOT A CONTRADICTION OF THE PARAGRAPH
+     * ABOVE (#51). It used to pass `at` — the landing instant — which did make the age and salary
+     * columns evaluate at the right moment, but also made `delayDays` compute as
+     * `scheduledFor - scheduledFor` and sit at zero for every scheduled retry ever scored. The
+     * feature builder now derives the landing instant itself, from the same `effectiveAt` used here,
+     * so it has both clocks and no column has to be sacrificed to give another one the right value.
+     * `at` is still what the guardrails and the audit trail reason about.
      */
     const at = guard.effectiveAt;
     const belief = scoreAction({
       diagnosis,
       observed,
       action,
-      context: { now: at, touchesUsed: caseState.touchesUsed },
+      context: { now: decidedAt, touchesUsed: caseState.touchesUsed },
     });
 
     const p = belief?.p;
@@ -412,6 +420,31 @@ export function decideForCase({
       approvalCheckIds: withBelief.approvalCheckIds,
       clearedByApproval: withBelief.clearedByApproval,
       approvedBy: withBelief.approvedBy,
+      /**
+       * THE BAR THIS PARTICULAR ACTION HAD TO CLEAR, and the standard error behind it (#52).
+       *
+       * Computed here rather than in `decideDisposition` because it is a PER-CANDIDATE quantity:
+       * sigma(EV) depends on this action's own probability and on how many comparable rows the model
+       * saw for it, so two candidates on the same case can legitimately face different bars. The old
+       * flat bar was case-level, and computing it once for the whole case is what made it look like a
+       * property of the case instead of a property of the estimate.
+       *
+       * Both are recorded whether or not the sigma term binds, because "this action cleared a bar of
+       * 200 paise" and "this action cleared a bar of 4,150 paise" are different claims about the same
+       * decision, and an audit trail that prints only the flat floor cannot tell them apart.
+       */
+      barPaise: actionThresholdPaise(config.POLICY, {
+        p,
+        rows: classifySupport(belief).rows,
+        amountPaise: caseState.amountPaise,
+        marginFraction: ev.components.margin,
+      }),
+      evSigmaPaise: evStandardErrorPaise({
+        p,
+        rows: classifySupport(belief).rows,
+        amountPaise: caseState.amountPaise,
+        marginFraction: ev.components.margin,
+      }),
     });
   }
 
@@ -758,14 +791,18 @@ export function explainDecision(rec) {
      * never explains it, which is precisely the failure that let a tie between two slots go
      * unnoticed for a day.
      *
-     * THE DELAY IS READ FROM THE TIMESTAMPS, NOT FROM THE `delayDays` FEATURE. That feature is
-     * `scheduledFor - now`, and `decide.js` scores every action at the instant it LANDS, so at
-     * serving `now == scheduledFor` and the feature is pinned at 0 for every scheduled retry — it
-     * carries no information the decision could have used. Printing it would say "landing in 0.0
-     * days" about a slot three days out, which is false. `effectiveAt - decidedAt` is the real
-     * delay and is always correct. (`delayDays` being inert at serving is a known train/serve skew,
-     * logged for the Day 8 eval to measure and, if it matters, retrain against — it is not this
-     * line's job to hide it behind a plausible-looking number.)
+     * THE DELAY IS READ FROM THE TIMESTAMPS, NOT FROM THE `delayDays` FEATURE, and after #51 the two
+     * agree rather than the trail having to work around a broken column. `effectiveAt - decidedAt` is
+     * the real delay and is correct by construction; `delayDays` is now built from the same
+     * `effectiveAt`, so it carries the same quantity. Before #51 the feature was `scheduledFor - now`
+     * evaluated at the landing instant — `scheduledFor - scheduledFor`, structurally 0 — and printing
+     * it would have said "landing in 0.0 days" about a slot three days out. `test/decide.test.js` used
+     * to pin that zero and now pins the agreement, which is the stronger assertion: two independent
+     * paths arriving at the same number.
+     *
+     * Worth knowing before trusting the column: the measured swing on `delayDays` is about -0.01
+     * log-odds across its whole training range, so it is alive but nearly weightless. Reading the
+     * delay from the timestamps was never only a workaround — it is also the more robust source.
      *
      * `salaryWindow` IS trustworthy here: it reads `action.scheduledFor` directly in both the
      * training features and the serving features, so it is identical on both sides. It is the

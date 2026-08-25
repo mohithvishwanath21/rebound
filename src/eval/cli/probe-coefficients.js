@@ -23,7 +23,7 @@
 import { generateBatch } from '../../sim/generator.js';
 import { buildDataset } from '../dataset.js';
 import { fitLogistic } from '../../ml/logistic.js';
-import { featureNames } from '../../ml/features.js';
+import { featureNames, buildFeatures } from '../../ml/features.js';
 import { EVAL_NOW } from '../evalClock.js';
 
 const TIMING_COLUMNS = ['salaryWindow', 'delayDays', 'isScheduled'];
@@ -65,31 +65,63 @@ console.log(`\nfor scale: largest weight in the model ${magnitudes[0].toFixed(4)
 console.log(`largest timing weight is ${(maxTimingWeight / magnitudes[0] * 100).toFixed(1)}% of the largest weight`);
 
 /**
- * THE TRAIN/SERVE SKEW, SIZED — added Day 7.
- * =========================================
+ * THE TRAIN/SERVE SKEW, SIZED — added Day 7, and CLOSED by #51 on Day 8.
+ * ======================================================================
  *
- * `dataset.js` builds every feature vector with `context.now` set to the DECISION instant.
- * `decide.js` scores each candidate at `guard.effectiveAt`, the instant the action LANDS. For three
- * of the 140 columns those two clocks disagree, and `delayDays` is the worst case: it is computed as
- * `scheduledFor - now`, so at serving `now == scheduledFor` and the column is structurally pinned at
- * zero for every scheduled retry the shipped engine has ever scored.
+ * WHAT THE DEFECT WAS. `dataset.js` built every vector with `context.now` at the DECISION instant.
+ * `decide.js` scored each candidate at `guard.effectiveAt`, the instant the action LANDS. Both were
+ * handed one clock and needed two, so each sacrificed a different column: training got `delayDays`
+ * right and `ageDays` wrong, serving got `ageDays` right and `delayDays` structurally pinned at zero
+ * (`scheduledFor - now` where `now == scheduledFor`).
  *
- * A weight alone does not say how much that costs. What matters is the weight times the range the
- * column actually spans in training — the log-odds swing the model learned to apply and then never
- * gets to apply in production. That product is what this block prints.
+ * WHY THE ARBITER WAS NEITHER OF THEM. Day 7 wrote this up as two coherent designs needing a choice.
+ * That was wrong: `responseModel.js` draws the label against LANDING-time age, so the label had
+ * already picked a side and the training-side `ageDays` was simply measuring a different quantity
+ * than the thing it was being fitted against. #51 gives `buildFeatures` both instants and derives the
+ * landing one from the same `effectiveAt` the guardrails use, so the two sides cannot drift again.
  *
- * `salaryWindow` is included as the control. It reads `action.scheduledFor` directly regardless of
- * `context.now`, so it is identical on both sides of the seam. Printing it here is what stops the
- * skew from being over-claimed: the column the model weighs most heavily is NOT one of the broken
- * ones, which is why the defect is worth measuring on Day 8 rather than panicking about tonight.
+ * WHAT THIS BLOCK NOW PRINTS, AND WHY IT IS NOT A LABEL. The notes below used to be hardcoded
+ * strings, which meant they went on asserting a defect for as long as nobody edited them — a probe
+ * that lies once it succeeds is worse than no probe. Each column's status is now COMPUTED: the same
+ * scheduled action is featurised the way the serving path calls it, and the column value is compared
+ * against what the old landing-instant convention produced. `salaryWindow` stays as the control; it
+ * read `action.scheduledFor` directly and so was never skewed in either direction.
+ *
+ * The swing — weight times the range the column spans in training — is the log-odds the model learned
+ * to spend. It is the number that says whether closing the seam could have mattered at all.
  */
-const SKEWED = {
-  delayDays: 'PINNED AT 0 at serving',
-  ageDays: 'shifts forward at serving',
-  ageDecayProxy: 'shifts forward at serving',
-  salaryWindow: 'consistent — the control',
+const DAY_MS = 86_400_000;
+const decisionAt = new Date(EVAL_NOW);
+const scheduledFor = new Date(decisionAt.getTime() + 2 * DAY_MS).toISOString();
+const probeArgs = {
+  diagnosis: { rootCause: 'INSUFFICIENT_FUNDS', matchTier: 'CODE', physics: { timingSensitive: true } },
+  observed: {
+    lossType: 'FAILED_PAYMENT',
+    rail: 'UPI',
+    amountPaise: 100_000,
+    occurredAt: new Date(decisionAt.getTime() - 3 * DAY_MS).toISOString(),
+  },
+  action: { kind: 'RETRY_SCHEDULED', scheduledFor },
 };
-console.log('\nTRAIN/SERVE SKEW — the log-odds swing each column learned across its training range:');
+// How the serving path calls it now (#51): the DECISION instant, with the landing instant derived.
+const nowVec = buildFeatures({ ...probeArgs, context: { now: decisionAt } });
+// How the serving path called it before (#51): the LANDING instant handed in as `now`.
+const oldVec = buildFeatures({ ...probeArgs, context: { now: new Date(scheduledFor) } });
+const columnStatus = (col) => {
+  const i = names.indexOf(col);
+  if (i < 0) return 'NOT PRESENT';
+  const before = oldVec.values[i];
+  const after = nowVec.values[i];
+  if (before === after) return `consistent across both conventions (${after.toFixed(3)})`;
+  return `was ${before.toFixed(3)} under the old convention, now ${after.toFixed(3)}`;
+};
+const SKEWED = {
+  delayDays: columnStatus('delayDays'),
+  ageDays: columnStatus('ageDays'),
+  ageDecayProxy: columnStatus('ageDecayProxy'),
+  salaryWindow: `${columnStatus('salaryWindow')} — the control`,
+};
+console.log('\nTRAIN/SERVE SKEW (closed by #51) — swing each column learned, and its value on both conventions:');
 for (const [col, note] of Object.entries(SKEWED)) {
   const i = names.indexOf(col);
   if (i < 0) {
@@ -108,9 +140,16 @@ for (const [col, note] of Object.entries(SKEWED)) {
   );
 }
 console.log(
-  '\nThe `delayDays` swing is the number to read: it is log-odds the model learned to spend and the\n' +
-    'shipped engine cannot spend, because the column it reads is always 0. Whether that costs any\n' +
-    'recovered money is a Day 8 measurement (task #51), not something to infer from a coefficient —\n' +
-    'the two age columns move in the same direction the delay would have, so it may be near-redundant.'
+  '\nWHAT #51 ACTUALLY BOUGHT, measured rather than inferred from these coefficients.\n' +
+    '`delayDays` was the column the defect was named after, and it turns out to be worthless: a swing\n' +
+    'of about -0.01 log-odds across its whole training range cannot move an argmax. The load-bearing\n' +
+    'half of the fix was `ageDays`, which swings about -1.18 and whose TRAINING clock was the one that\n' +
+    'disagreed with the label. So the fix was real and the headline framing of it was wrong.\n' +
+    'A/B on a fixed g130 generator, TRAIN seeds 1-3 at count 80, incremental recovery: seed 1 and\n' +
+    'seed 2 identical to the paise, seed 3 fell from Rs 1,74,521 to Rs 50,799. Closing the seam COST\n' +
+    'Rs 1,23,722 across three worlds, because a correctly-aligned age decay scores stale cases lower,\n' +
+    'they drop under the Rs 2 EV bar sooner, and the agent stops earlier. That is task #52, not an\n' +
+    'argument for reopening the seam: a feature fitted against a different quantity than its own label\n' +
+    'is a defect whether or not it happens to pay.'
 );
 

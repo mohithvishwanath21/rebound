@@ -34,8 +34,8 @@ Verify the six commands it runs, rather than trusting the label:
 
     npm test
 
-Expect `# pass 420`, `# fail 0`, `# todo 0`. Roughly 7 seconds. Section 8 explains why the count moved
-and why there are no longer any `todo` entries.
+Expect `# pass 619`, `# fail 0`, `# todo 0`, across 25 files. Roughly 16 seconds. Section 8 explains why
+the count moved and why there are no longer any `todo` entries.
 
 The tests are in three deliberately separate categories, and the distinction matters more than the
 count:
@@ -65,9 +65,11 @@ revoked mandate is refused, not priced", "an unprofitable deferred action does n
 stop still knows its evidence".
 
 Two Day 7 pins are worth singling out, because both exist to stop a *silent* failure rather than a
-loud one. "the trail states the scheduled delay from the timestamps, not from the inert delayDays
-feature" asserts a feature is zero *and* that the printed sentence is not, since checking only the
-sentence would pass whenever the two happen to agree. And the stub gateway in
+loud one. "the trail's delay agrees with the delayDays feature, now that the feature is alive" began
+life asserting the feature was zero *and* that the printed sentence was not — pinning a defect it had
+been decided not to fix yet, which is the right thing to do, but it also means the test fails the
+moment the defect is fixed. That is exactly what #51 did to it, and the failure was the fix reporting
+itself. It now asserts the two agree, which is the stronger claim. And the stub gateway in
 `test/orchestrator.test.js` now runs the same `validateActionRequest` production runs — it previously
 accepted more than production accepted, which is how a crash-on-first-run defect survived 417 green
 tests. Section 9 has that story.
@@ -424,6 +426,14 @@ was `CAPTURED`. About seven seconds, no database, no network, no API key.
 
 With the defaults (`seed=day7`, 80 cases, 8 cycles 12 hours apart from 2026-08-24T09:30:00Z):
 
+> **THE FIGURES IN THIS TABLE ARE HISTORICAL AND WILL NOT REPRODUCE.** They were measured on generator
+> **g100** with an 8-cycle horizon, before the deferral spin loop (#67), the approval gate (#60/#61), the
+> generator RNG fix (#64), the train/serve skew (#51), the σ bar (#52) and the phantom retry recovery
+> (#68) were closed. Running the command today prints different and larger numbers. The table is kept
+> because the **exposure-split reasoning below it** is the durable part and is what the command is worth
+> running for. **Do not quote ₹4,311 as a result anywhere** — measured against the same world with the
+> spin loop fixed, the same arm recovers roughly 19x that. Current figures live in section 12.
+
 | | |
 |---|---|
 | total at risk | ₹11,20,352 |
@@ -492,42 +502,53 @@ an unparsable `occurredAt` — because the failure without it was an `undefined`
 deep, and a *missing* `occurredAt` was worse still, silently making the case age `NaN` and filling the
 report with plausible numbers computed from nothing.
 
-### An open train/serve skew, printed rather than hidden
+### A train/serve skew, printed rather than hidden — and closed on Day 8 (#51)
 
 While making the audit trail explain its timing, the line read *"landing in 0.0 days"* about a slot six
 hours out. A probe that builds the feature vector both ways found **3 of 140 columns differ** between
-the dataset and the engine:
+the dataset and the engine: `delayDays` was always 0 at serving, and `ageDays` / `ageDecayProxy`
+described the case at the decision instant in training but at the landing instant at serving.
+`salaryWindow` was the control — it reads `action.scheduledFor` directly in both paths, so passing the
+landing instant into the scorer was never what made the salary window visible.
 
-| column | in training | at serving | |
-|---|---|---|---|
-| `delayDays` | 0.25 / 3 / 9 | **always 0** | skew |
-| `ageDays` | age at decision (1.0942) | age at landing (1.5228) | skew |
-| `ageDecayProxy` | 0.3348 | 0.2181 | skew |
-| `salaryWindow` | proximity of the slot | proximity of the slot | consistent |
-
-`dataset.js` builds features at the decision instant; `decide.js` scores at the landing instant, where
-`delayDays` is `scheduledFor - scheduledFor` and therefore structurally zero for every scheduled retry.
-How much the model wanted to say with that column is a measurement, not a guess:
+Day 7 left this open on purpose and described it as two internally coherent conventions needing a
+choice. **That framing was wrong, and Day 8 says why: there was no choice to make, because a third
+party had already made it.** `src/sim/responseModel.js` draws the outcome label against LANDING-time
+age. So the training-side `ageDays` was not one defensible convention among two — it was measuring a
+different quantity than the label it was being fitted against. #51 gives `buildFeatures` both instants
+and derives the landing one from the same `effectiveAt` the guardrails use, so the two sides cannot
+drift apart again by restating a rule.
 
     node src/eval/cli/probe-coefficients.js
 
-Read the `TRAIN/SERVE SKEW` block. Weight alone means little; the figure that matters is weight times
-the range the column spans in training — the log-odds the model learned to spend and the shipped engine
-cannot. `delayDays` carries a **−0.5854 swing that never fires in production**, which is *larger* than
-`ageDays` (−0.4765) and larger than `salaryWindow` (0.3953), the column the model weighs most heavily.
+Read the `TRAIN/SERVE SKEW (closed by #51)` block. It featurises one scheduled action under both
+conventions and prints `delayDays ... was 0.000 under the old convention, now 2.000`, with the age
+columns reported `consistent across both conventions`. Those statuses used to be hardcoded strings,
+which meant the probe would have gone on announcing a defect after the defect was fixed; they are now
+computed, because a probe that keeps reporting a failure it no longer detects is worse than no probe.
 
-Note which column is *not* affected, and it is the control in that block: `salaryWindow` reads
-`action.scheduledFor` directly in both paths. So passing the landing instant into the scorer was not
-what made the salary window visible; that was already correct. Its only measured effects were zeroing
-`delayDays` and ageing the case forward.
+**The fix cost money, and the number is stated here rather than left for a reader to find.** A/B on a
+fixed g130 generator at commit `e99c28d`, TRAIN seeds 1-3, count 80, incremental recovery: seed 1
+unchanged at ₹5,61,016, seed 2 unchanged at ₹42,108, seed 3 **down from ₹1,74,521 to ₹50,799**. Pooled,
+closing the seam cost **₹1,23,722**, about 16% — and the pre-registered prediction said money would go
+UP by less than 10%, so that prediction is falsified in both direction and size. The fix stays, on the
+ground that a feature fitted against a different quantity than its own label is a defect whether or not
+it happens to pay: training on decision-time age fed the model a systematically *younger* case than the
+one its label described, which is an optimistic view of every scheduled retry, and losing an optimistic
+view costs money by construction.
 
-This is **not fixed yet, deliberately.** Two internally coherent conventions exist — decision-time
-features with an explicit delay column, or landing-time features with the delay absorbed into age — and
-the defect is that training uses one while serving uses the other. Choosing between them changes every
-trained model and every Day 5 figure, so it belongs in the eval where its effect on recovered money can
-be measured instead of asserted. Meanwhile the audit trail sidesteps it by reading the delay from the
-timestamps, and `test/decide.test.js` pins that: it asserts *both* that the feature is zero *and* that
-the printed delay is not, because asserting only the printed text would pass whenever the two agree.
+**And the defect was named after the wrong column.** `delayDays` — the column the whole task was about
+— carries a weight of −0.0014 over a training range of [0, 9], a swing of −0.0125 log-odds. Nothing that
+small moves an argmax. The money came from `ageDays` (weight −0.4316, swing −1.18), whose *training*
+clock was the misaligned one. The chain is: age becomes correct, the fitted decay sharpens, stale cases
+score lower, EV drops under the ₹2 bar sooner, the agent stops earlier, and in seed 3 stopping earlier
+was expensive (1,278 fewer decisions). That makes the seed-3 decline a story about the EV floor, not
+about features — which is task #52.
+
+One unlooked-for confirmation fell out of it: seed 1's **gross** fell ₹73,518 while its **incremental**
+held identical to the paise. The entire gross decline was credit for cases that would have recovered on
+their own. An unrelated change reduced the gross by exactly the amount the incremental column was
+already refusing to count. Quote incremental.
 
     node --test test/decide.test.js
 
@@ -579,11 +600,16 @@ same world (same seed, same generator version), same model (one fit, shared), sa
 `runId` in separate stores, so identical coin flips), same clock.
 
 **Second, the compliance columns.** `quiet!`, `cap!` and `ABS!` count rules actually broken by actions
-actually taken. Expect **B2_AGGRESSIVE at 549-578 quiet-hours messages and 966-1,040 contact-cap
-breaches per world, and exactly zero of both for B1, B3 and Rebound.** The `worst7d` column is the one
-to read out loud: B2 reaches **30 to 45 messages to a single customer inside seven days against a cap of
-2**, while Rebound sits at **exactly 2 of 2 — the cap binds and is never crossed**. That is the point of
-the comparison: B2 is what "just retry harder" looks like when nobody is counting.
+actually taken. Pooled over the five worlds, expect **B2_AGGRESSIVE at 2,836 quiet-hours messages and
+5,095 contact-cap breaches across 278 distinct customers, and exactly zero of both for B1, B3 and
+Rebound.** The `worst7d` column is the one to read out loud: B2 reaches **45 messages to a single
+customer inside seven days against a cap of 2** (58 to one customer over the whole run), while Rebound
+sits at **exactly 2 of 2 — the cap binds and is never crossed**. That is the point of the comparison:
+B2 is what "just retry harder" looks like when nobody is counting.
+
+One honest qualification, because the overreaching version of this claim is tempting: **`ABS!` is 0 for
+every arm including B2.** B2 is not breaking the absolute prohibitions — it is repeatedly breaking the
+per-customer window cap that sits below them. Say the specific thing.
 
 Do **not** read `refused` as a cross-arm number. It counts refused *candidates*, and the arms enumerate
 completely different numbers of candidates per cycle — Rebound prices the whole action space, B1
@@ -596,28 +622,41 @@ subtraction is happening on the basis it was measured on. Gross recovery is not 
 anywhere, because an arm that reaches a case on day 2 which would have paid unprompted on day 9 books
 the full amount as its own.
 
-Expect, against **B3_FIXED_LADDER** (the compliant, competently-designed baseline — the comparison that
-matters): mean **+₹78,530** incremental, range **−₹40,591 to +₹3,83,975**, sd **₹1,72,568**, **ahead in
-4 of 5 worlds**, pooled 1.93x.
+**The claim to lead with, because it is clean on every basis at once: Rebound recovers 1.8728x
+B3_FIXED_LADDER's incremental money using 14% FEWER attempts** — 1,379 against 1,610, which is 2.19x
+the money per action (45,501 paise per attempt against B3's 20,810). That sentence needs no argument
+about whether rule-breaking counts and no choice of denominator to make it work.
 
-**Quote the sign count, not the ratio.** The sd is more than twice the mean, the range crosses zero, and
-the pooled 1.93x is carried almost entirely by seed 1 — where Rebound takes ₹4,56,975 against B3's
-₹73,000. Drop that one world and the effect is modest. "4 of 5 worlds, one negative, sd larger than the
-mean" is the honest sentence. There is no p-value at n=5 and the run does not print one; it prints the
-mean with the range, the sd, the sign count and the n.
+Against **B3_FIXED_LADDER** (the compliant, competently-designed baseline — the comparison that matters,
+and it was designated in the harness before any result came in): mean **+₹58,483** incremental, range
+**−₹83,034 to +₹3,86,987**, sd **₹1,88,613**, **ahead in 3 of 5 worlds**, pooled **1.8728x**.
 
-**And against B2_AGGRESSIVE, the rule-breaker, Rebound loses: mean −₹42,194, ahead in 2 of 5 worlds,
-pooled 0.79x.** This is stated here rather than left for a reader to find. Before Day 8 gave the
-approval queue a human to answer it, this comparison was a tie; unfreezing the queue helped B2 more,
-because B2 queues fewer requests and had less exposure stuck behind the gate.
+**Quote the sign count, not the ratio.** The sd is more than three times the mean, the range crosses
+zero, and the pooled figure is carried almost entirely by seed 1. "Ahead in 3 of 5 worlds, two negative,
+sd three times the mean" is the honest sentence. There is no p-value at n=5 and the run does not print
+one; it prints the mean with the range, the sd, the sign count and the n.
+
+**And against B2_AGGRESSIVE, the rule-breaker, Rebound loses: mean −₹50,358 incremental, ahead in 2 of 5
+worlds, pooled 0.7136x** (₹6,27,454 against ₹8,79,244). This is stated here rather than left for a
+reader to find, and it got **worse** than the previously recorded figure, not better — earlier runs on
+the g130 generator showed 4-of-5 against B3 and 0.79x against B2. Two fixes landed between those runs
+(#51's train/serve skew and #68's phantom retry recovery) and the regression is attributed to them
+together rather than pinned on either, because they were not measured in isolation.
 
 On money alone, over ten days, on held-out worlds, the rule-breaking baseline beats us. What the same
-table also shows is the price of being B2: ~1,100 messages per world with about half inside quiet hours,
-30-45 messages to one customer in a week against a cap of 2, and a volume the run's own circuit-breaker
-audit flags **"YES — production would have truncated this arm"** at 1,155 messages against a production
-cap of 250. B2's figure is not one a merchant could run; it is what you get with the compliance rules
-switched off. B3 is therefore the comparison the experiment was built around — which was its stated
-design before this result came in, not a line drawn after seeing it.
+table also shows is the price of being B2: **6,609 attempts and 5,664 messages against Rebound's 1,379
+and 691 — 4.8x the volume for 1.40x the money** — with the quiet-hours and contact-cap counts above.
+B2's figure is not one a merchant could run; it is what you get with the compliance rules switched off.
+B3 is therefore the comparison the experiment was built around, which was its stated design before this
+result came in, not a line drawn after seeing it.
+
+**A number worth checking because it is the least flattering one here.** Rebound's gross recovery is
+₹7,01,973 and its incremental is ₹6,27,454, so **₹74,519 — a tenth of what it recovers — is money the
+customer would have paid anyway.** That is the largest counterfactual deduction of any arm (B3 loses
+13.2% of gross, Rebound 10.6%, B2 only 5.4%). It also means the basis is not neutral: switching gross →
+incremental improves Rebound against B3 and worsens it against B2, so choosing a basis per comparison
+would be choosing a winner. The harness quotes incremental for both.
+
 
 **Fourth, the horizon.** If you shorten the run you will make Rebound look better, which is why the
 report prints a HORIZON TRUNCATION block with per-arm `pendingActions` whenever the horizon is under
@@ -686,7 +725,82 @@ one — and that omission flatters us rather than being neutral, because Rebound
 reviewer's business-hours deferral, and 500 sweep perturbations that must never trip the approver's own
 SLA guard.
 
+### 12b. The noise bar — an A/B you can run yourself from one code state
+
+The threshold an action must clear used to be a flat ₹2. Its justification was that the probability
+estimate has a standard error, and **a constant cannot track a standard error**: σ(EV) = σ(p) × amount ×
+margin, so it grows with the stake and shrinks with the number of comparable rows the model saw. The bar
+is now `max(₹2, k × σ(EV))` with `POLICY.evBarSigmaK = 1`.
+
+Setting `k = 0` restores the old flat bar **exactly**, which is what makes this an A/B rather than a
+before/after — the world, the model, the luck and the clock are all held, and only the bar moves:
+
+    node src/eval/cli/run.js --seeds=1,2,3,4,5 --count=80 --split=TEST --ev-bar-sigma-k=0
+    node src/eval/cli/run.js --seeds=1,2,3,4,5 --count=80 --split=TEST --ev-bar-sigma-k=1
+
+**Expect the incremental money to be identical to the paise in all five worlds** (pooled ₹6,27,454 both
+ways) while attempts fall 1,443 → 1,379, so paise per attempt rises 4.6%. `B3_FIXED_LADDER` should come
+back **bit-identical** between the two runs; if it does not, the flag is leaking into something it should
+not touch and the comparison is void.
+
+"Zero rupees lost" is a suspicious result, so check the mechanism rather than the total: in every seed
+the number of retries removed **equals** the number of *failed* retries removed exactly (13/13, 7/7, 3/3,
+3/3, 10/10), plus 28 messages that recovered nothing. The bar removed 4.4% of the actions and none of the
+money because what it removed was actions that were going to fail.
+
+**The cost, which was not predicted and is not zero.** Net recovery falls ₹23 pooled, and one world loses
+₹108. Stopped cases rise in every seed and unresolved cases fall in every seed: a noise bar converts
+cheap wrong actions into human attention, and human attention is priced at ₹60. That trade is the honest
+description of what this change does.
+
+**Why an unseen cell deliberately does NOT get a σ bar.** With `rows = 0` the probability is the global
+base rate and the error in it is **bias, not variance** — a standard error cannot express bias, so
+inventing one would be arithmetic theatre. Those cases fall back to the flat floor and are handled by
+`APR_UNSUPPORTED_BELIEF`, which routes money movement on an unsupported belief to a human. The first
+implementation got this wrong in a way worth knowing about: applying the Jeffreys pseudo-count
+unconditionally gave σ(p) ≈ 0.22 at rows = 0, a bar of roughly a fifth of the amount, which turned
+`AWAIT_APPROVAL` into `ESCALATE_HUMAN`. Those are not interchangeable — approval gates an action the
+agent has chosen and wants permission for; escalation is the agent declining to choose — and the swap
+would have silently disabled the approval envelope while every headline number still looked reasonable.
+
+    node --test test/expectedValue.test.js
+
+**Expect 27 tests, 27 pass**, including σ(EV) hand-computed to the paise, the amount-invariance of
+EV/σ(EV), and the assertion that `k = 0` reproduces the flat bar.
+
+### 12c. The eleventh defect that flattered the headline
+
+`RETRY_NOW` and `RETRY_SCHEDULED` on an `OVERDUE_INVOICE` were priced as if they could succeed. **There
+is no failed charge to re-present** — the merchant sent an invoice, they never charged the card. The
+recovery was real in the metrics and impossible in the world.
+
+The cause is a shape worth recognising: the response model's `actionFit` table is indexed by **payer
+type**, so it structurally cannot express "this *action* is meaningless for this *loss type*". A
+reminder-responsive payer picked up a 0.50 fit for `RETRY_NOW` and the arithmetic did the rest. The
+taxonomy knew; the physics did not.
+
+    node --test test/retryTiming.test.js
+
+The fix moved **1.39 percentage points of the entire labelled population** out of the recovered column:
+`INVOICE_FORGOTTEN|RETRY_NOW` went from 18.06% empirical recovery to **0.00%** with n unchanged at 1,113.
+That equality — labels moved, row counts did not — is the check that the fix changed the physics rather
+than the dataset. The pinning test also asserts the fix is *narrow*: `SEND_LINK` to the same payer on the
+same invoice must still work, and `RETRY_NOW` on a genuine `FAILED_PAYMENT` must still work, so "fixed"
+cannot quietly mean "invoices are now unrecoverable".
+
+This is the eleventh defect in this project that made the headline number look **better**, and not one
+has made it look worse. That is not luck — a defect that made the number look bad would have been
+investigated the day it appeared. **A bug that flatters the metric will not be found by reading the
+metric**, which is why every one of these was caught by a probe that counted events in the world rather
+than rupees in the report.
+
+It also forced a retraction. The claim that the model **under-predicts recovery 6x** was wrong: on the
+corrected physics, pooled empirical 9.93% against predicted 9.92% is **1.00x**. The "gap" was the
+phantom recovery inflating the empirical side. What survives is within-cell mis-ranking, worst at
+`INVOICE_DISPUTED|ESCALATE_HUMAN` (22.81% empirical against 10.17% predicted, n=114).
+
 ---
+
 
 ## 13. What is proven versus what is measured
 

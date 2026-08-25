@@ -468,6 +468,43 @@ export function recoveryProbability({ action, latent, event, now, touchesUsed = 
     return { p: 0, breakdown: { reason: 'action collects no money directly' } };
   }
 
+  /**
+   * YOU CANNOT RETRY A CHARGE THAT WAS NEVER MADE (#68).
+   *
+   * `actionFit` is indexed by PAYER TYPE, so it can express "this person will pay if reminded" but it
+   * structurally cannot express "this ACTION is meaningless for this LOSS TYPE." An OVERDUE_INVOICE
+   * is not a failed charge — nobody attempted a payment and it declined; the invoice was simply never
+   * paid. There is no authorisation to re-present and no instrument on file to charge, which is
+   * exactly what `ROOT_CAUSES.INVOICE_FORGOTTEN` says in its own comment: "nothing to retry; there is
+   * no failed charge."
+   *
+   * Without this branch, an invoice case belonging to a WILL_PAY_IF_REMINDED payer picked up
+   * `actionFit[WILL_PAY_IF_REMINDED][RETRY_NOW] = 0.50` and recovered at a measured 18.06% (n=1113)
+   * from an action that cannot physically occur. That is not a small mis-specification. A retry is the
+   * CHEAPEST action in the whole model — no channel cost, no patience penalty, the entire reason
+   * `test/decide.test.js` shows a retry beating an email by ₹4 of goodwill — so a free 18% lottery
+   * ticket on the largest loss type is precisely what an EV-maximising agent will spend its batch on.
+   * The recovery was real in the metrics and impossible in the world.
+   *
+   * This is the eleventh defect in this project that made the headline number look BETTER, and like
+   * the other ten it was invisible in the headline number. It surfaced only from asking a different
+   * question — comparing per-cell empirical recovery against the taxonomy's physics claims
+   * (`probe-mispricing.mjs`), which is a comparison no summary metric performs.
+   *
+   * The right recovery actions for an unpaid invoice remain fully available and unchanged: SEND_LINK,
+   * SWITCH_RAIL_NUDGE, REQUEST_REAUTH and ESCALATE_HUMAN. This closes one impossible path; it does not
+   * make invoices unrecoverable.
+   */
+  if (isRetry(kind) && event?.lossType === LossType.OVERDUE_INVOICE) {
+    return {
+      p: 0,
+      breakdown: {
+        ...breakdown,
+        reason: `${kind} on an OVERDUE_INVOICE is a structural zero: there is no failed charge to re-present`,
+      },
+    };
+  }
+
   // --- 1. Action fit for this latent payer type -----------------------------
   const fitRow = A.actionFit[latent.payerType] ?? {};
   let p = fitRow[kind] ?? 0;

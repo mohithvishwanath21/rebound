@@ -706,26 +706,32 @@ function timingScorer(p = 0.3) {
   };
 }
 
-test('the trail states the scheduled delay from the timestamps, not from the inert delayDays feature', () => {
+test('the trail\'s delay agrees with the delayDays feature, now that the feature is alive', () => {
   /**
-   * THE DEFECT THIS PINS.
+   * WHAT THIS TEST USED TO PIN, AND WHY IT CHANGED.
    *
-   * `decide` prices every action at the instant it LANDS, so for a scheduled retry `context.now`
-   * IS `action.scheduledFor` and the `delayDays` feature is `scheduledFor - scheduledFor` = 0,
-   * always. An explanation that read the feature printed "landing in 0.0 days" about a slot six
-   * hours out, which is false — a plausible-looking number computed from nothing, which is the one
-   * category of output this project treats as worse than no output.
+   * It used to assert `rec.chosen.timing.delayDays === 0` with the comment "the feature is pinned at 0
+   * at serving; that is the skew". That was an accurate description of a defect, and pinning a defect
+   * you have decided not to fix yet is the right thing to do — but it means the test fails the moment
+   * you fix it, which is exactly what happened when #51 landed. The failure was the fix reporting
+   * itself.
    *
-   * `effectiveAt - decidedAt` is the real delay and cannot degenerate, so that is what the line
-   * reads. Asserting BOTH here — that the feature really is 0 and that the printed delay is not —
-   * is the only way this stays pinned: assert only the printed text and a future refactor that
-   * reintroduces the feature-based delay would still pass whenever the two happen to agree.
+   * The skew: `decide` passed `guard.effectiveAt` as `context.now`, so `delayDays` computed as
+   * `scheduledFor - scheduledFor` = 0 for every scheduled retry ever scored. `buildFeatures` now takes
+   * the DECISION instant and derives the landing instant itself, so it holds both clocks and the
+   * column carries the real wait.
+   *
+   * The assertion inverts accordingly. It used to be that the printed delay and the feature MUST
+   * disagree (one was real, one was dead). Now they must AGREE, and that agreement is the stronger
+   * property: two independent paths — the audit trail reading `effectiveAt - decidedAt` from the
+   * timestamps, and the feature vector reading it from `effectiveAt(action, decisionAt)` — arrive at
+   * the same number. Either one alone could be wrong; both agreeing is hard to fake.
    */
   const rec = decide({ scoreAction: timingScorer(0.3), candidates: [
     { kind: ActionKind.RETRY_SCHEDULED, scheduledFor: '2026-08-26T09:30:00Z' }, // 2 days out
   ] });
 
-  assert.equal(rec.chosen.timing.delayDays, 0, 'the feature is pinned at 0 at serving; that is the skew');
+  assert.equal(rec.chosen.timing.delayDays, 2, 'the feature must now carry the real wait, not 0');
   assert.equal(rec.chosen.timing.isScheduled, 1);
 
   const line = rec.explain.find((l) => l.startsWith('Timing:'));
@@ -734,6 +740,14 @@ test('the trail states the scheduled delay from the timestamps, not from the ine
   assert.doesNotMatch(line, /landing in 0\.0 days/);
   assert.match(line, /priced at that future slot, not now/);
   assert.match(line, /Salary-window proximity of the slot is 1\.00/);
+
+  // The two paths must not merely both be non-zero — they must be the SAME number. A trail that
+  // printed 2.0 while the model scored on 0.5 would pass every assertion above.
+  assert.match(
+    line,
+    new RegExp(`landing in ${rec.chosen.timing.delayDays.toFixed(1)} days`),
+    'the printed delay and the feature the model actually scored on must be the same quantity'
+  );
 });
 
 test('an action that fires now says so, and does not claim a future slot', () => {

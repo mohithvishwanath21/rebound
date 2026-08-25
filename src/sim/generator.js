@@ -45,7 +45,7 @@ import { ASSUMPTIONS } from './responseModel.js';
  * event got its own RNG stream, and to 1.3.0 when the rail draw stopped discarding the customer's
  * preferred rail. `batchIdFor` folds this into every batch id precisely so that a change
  * to the world cannot be mistaken for a change in results: any number computed against a `g100` batch
- * is not comparable to one computed against `g110`, `g120` or `g130`, and the id says so out loud.
+ * is not comparable to one computed against `g110`, `g120`, `g130` or `g140`, and the id says so out loud.
  *
  * 1.2.0 changes every event in every batch, because it changes the order numbers are drawn in. It
  * buys the property the Day 8 sensitivity sweep is built on — perturbing one world parameter perturbs
@@ -57,8 +57,17 @@ import { ASSUMPTIONS } from './responseModel.js';
  * cases, and rail feeds `railSuccess`, `channelReach` and therefore every recovery probability. So
  * g120 figures are void for the same reason: re-measure, do not carry forward. The bug it fixes is
  * written up under `chosenRail` below, and `probe-rail.mjs` holds the before-and-after measurement.
+ *
+ * 1.4.0 (#68) is the first bump that this file does not itself cause, and it is deliberate. The
+ * change lives in `src/sim/responseModel.js`: a retry against an OVERDUE_INVOICE now returns a
+ * structural zero, because there is no failed charge to re-present. Nothing about the events this
+ * file emits is different. But the version exists to answer one question — "is this number
+ * comparable to that number?" — and the answer for anything measured before #68 is no, because the
+ * simulator used to pay out on an action that cannot occur. Folding a response-model change into
+ * the same counter is the only way the batch id can keep telling the truth. If the two ever need to
+ * move independently, split the counter; do not leave a world change unversioned.
  */
-export const GENERATOR_VERSION = '1.3.0';
+export const GENERATOR_VERSION = '1.4.0';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;

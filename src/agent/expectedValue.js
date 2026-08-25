@@ -175,6 +175,48 @@ export function expectedValue({ p, amountPaise, lossType, action, touchesUsed = 
 }
 
 /**
+ * The standard error of an expected value, in paise.
+ *
+ * `EV = p x amount x margin - costs`. The costs are constants — a channel price, a review price —
+ * so all the uncertainty sits in `p`, and it passes through multiplied by the stake:
+ *
+ *     sigma(EV) = sigma(p) x amount x margin
+ *
+ * `sigma(p)` is the binomial standard error over the rows the model actually saw for this cell.
+ * The `+2` is a pseudo-count, and it is doing real work rather than avoiding a divide-by-zero: with
+ * a bare `1/n`, a cell that happened to contain three rows all of one class reports `sigma = 0` and
+ * the resulting bar collapses to the flat floor exactly where the evidence is flimsiest. The +2 is
+ * the same device as a Jeffreys prior — it says "treat every cell as if two coin flips of unknown
+ * outcome were already in it" — and it means a thin cell is reported as uncertain instead of as
+ * certain-and-extreme.
+ *
+ * WHAT THIS DELIBERATELY DOES NOT DO: rescue an UNSEEN cell. When `rows` is 0 the probability is the
+ * global base rate, and the error in that number is BIAS — the cell may be nothing like the average —
+ * not variance. A standard error cannot express bias, and inventing a sigma for those cases would be
+ * arithmetic theatre. So `rows = 0` returns null and the caller falls back to the flat floor, leaving
+ * unseen beliefs to `APR_UNSUPPORTED_BELIEF`, which routes money movement on them to a human.
+ *
+ * THE FIRST VERSION OF THIS FUNCTION DID NOT DO WHAT THE PARAGRAPH ABOVE SAYS, and a test caught it.
+ * With the `+2` pseudo-count applied unconditionally, `rows = 0` gave sigma(p) = sqrt(p(1-p)/2) —
+ * around 0.22 at a base rate of 0.11, so a bar of roughly a fifth of the whole amount. Unsupported
+ * money movement then fell below its own bar and came out as ESCALATE_HUMAN instead of
+ * AWAIT_APPROVAL. Those are not interchangeable: approval is a gate on an action the agent has
+ * chosen and wants permission for, escalation is the agent declining to choose. Swapping one for the
+ * other would have quietly disabled the approval envelope built in #60 and #61 while every headline
+ * number still looked reasonable. `test/decide.test.js` line 549 held the line.
+ *
+ * A THIN cell (rows > 0, below the minimum count) gets BOTH a sigma bar and the approval rule, and
+ * that is not double-counting. The sigma bar decides whether acting is worth it at all; approval
+ * decides whether a person signs off on acting. A thin cell can fail either independently.
+ */
+export function evStandardErrorPaise({ p, rows, amountPaise, marginFraction = 1 } = {}) {
+  if (!Number.isFinite(p) || !Number.isFinite(amountPaise) || !Number.isFinite(marginFraction)) return null;
+  if (!Number.isFinite(rows) || rows <= 0) return null;
+  const varianceP = Math.max(p * (1 - p), 1e-9) / (rows + 2);
+  return Math.sqrt(varianceP) * amountPaise * marginFraction;
+}
+
+/**
  * The bar an action must clear to be worth taking, in paise.
  *
  * `POLICY.minEvToActPaise` is ₹2 rather than zero, and the gap is not squeamishness. The
@@ -183,11 +225,35 @@ export function expectedValue({ p, amountPaise, lossType, action, touchesUsed = 
  * value, it is fitting the noise in the estimate. The threshold is the honest admission that
  * the number has a standard error attached even though the arithmetic prints to the paise.
  *
- * It is also a reportable knob: raising it trades recovered rupees for fewer actions taken,
- * which is the trade a merchant may legitimately want to set for themselves.
+ * IT USED TO BE A FLAT ₹2, AND THE FLAT VERSION DID NOT DO WHAT THE PARAGRAPH ABOVE CLAIMS (#52).
+ * The justification is about noise, and the noise in an expected value is not constant — it scales
+ * with the stake. So a flat bar demands 1% of confidence on a ₹200 case and four ten-thousandths of
+ * a percent on a ₹5,00,000 one: strictest exactly where it matters least. `probe-evbar.mjs`
+ * measured the consequence — a large share of chosen actions cleared ₹2 while sitting below one
+ * standard error of their own EV.
+ *
+ * THE MEASUREMENT ALSO CORRECTED MY REASONING, WHICH IS THE MORE USEFUL HALF. I expected the
+ * failure to concentrate in large amounts. It does not, and it cannot: EV and sigma(EV) both scale
+ * linearly in the amount, so `EV / sigma(EV) = p / sigma(p)` is amount-INVARIANT. The largest
+ * quartile turned out to be the safest. Every bit of the problem lives in `sigma(p)`, i.e. in how
+ * many comparable rows the model saw. That makes the noise bar and the support gate algebraically
+ * the same instrument, discovered from two directions — which is why the sigma form below is
+ * scaled by support and why unseen cells are left to the approval rule instead.
+ *
+ * `POLICY.evBarSigmaK` is the number of standard errors demanded. Setting it to 0 restores the flat
+ * bar EXACTLY, which is not a legacy escape hatch — it is what lets the two policies be run as an
+ * A/B from one code state, and what lets the Day 8 sweep perturb `k` like any other assumption.
+ *
+ * It remains a reportable knob either way: raising it trades recovered rupees for fewer actions
+ * taken, which is the trade a merchant may legitimately want to set for themselves.
  */
-export function actionThresholdPaise(policy = POLICY) {
-  return policy.minEvToActPaise;
+export function actionThresholdPaise(policy = POLICY, evidence = null) {
+  const floor = policy.minEvToActPaise;
+  const k = policy.evBarSigmaK ?? 0;
+  if (!k || !evidence) return floor;
+  const sigma = evStandardErrorPaise(evidence);
+  if (!Number.isFinite(sigma) || sigma <= 0) return floor;
+  return Math.max(floor, Math.round(k * sigma));
 }
 
 /**

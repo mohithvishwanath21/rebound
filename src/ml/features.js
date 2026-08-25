@@ -53,6 +53,18 @@ import { LOSS_TYPES, RAILS } from '../core/enums.js';
 import { ROOT_CAUSE_IDS } from '../core/taxonomy.js';
 import { ActionKind, Channel, ALL_ACTION_KINDS } from '../core/actions.js';
 import { MatchTier } from '../agent/diagnose.js';
+/**
+ * Imported rather than restated, and that is the entire fix for #51.
+ *
+ * `effectiveAt(action, now)` is `max(action.scheduledFor, now)` — the instant an action actually takes
+ * effect. Three feature columns depend on it, the guardrail engine depends on it, and the simulator
+ * that generates the labels computes its own copy of the same rule. When this file derived the landing
+ * instant by hand instead, the trainer and the serving path drifted apart without either one being
+ * obviously wrong. A shared function cannot drift.
+ *
+ * No cycle: `guardrails.js` imports only from `core/`. This file already imported from `agent/`.
+ */
+import { effectiveAt } from '../agent/guardrails.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const CHANNELS = Object.values(Channel);
@@ -115,7 +127,24 @@ function oneHot(prefix, value, universe) {
  * "w[87] = -2.9" is not, and this project has to be defensible out loud.
  */
 export function buildFeatures({ diagnosis, observed, action, context = {} }) {
-  const now = context.now ? new Date(context.now) : new Date();
+  /**
+   * TWO INSTANTS, NOT ONE (#51). `context.now` is when the DECISION is being made. `landsAt` is when
+   * the action would take effect. For everything except a scheduled retry they are the same instant,
+   * and for a scheduled retry the gap between them is the whole point.
+   *
+   * Both are needed, and passing only one is what broke this for six days:
+   *
+   *   - `dataset.js` passed the decision instant. So `delayDays` was correct, but `ageDays` described
+   *     the case at decision time — while the label was drawn by `responseModel.js` against the case's
+   *     age at LANDING (its line 523). The feature and its own label measured different quantities.
+   *   - `decide.js` passed the landing instant. So `ageDays` was right, but `delayDays` was computed as
+   *     `scheduledFor - landsAt`, which for a future slot is exactly zero. The column was structurally
+   *     dead at serving for every scheduled retry the engine ever scored.
+   *
+   * Neither call site was doing anything visibly wrong. They were each handed one clock and needed two.
+   */
+  const decisionAt = context.now ? new Date(context.now) : new Date();
+  const landsAt = effectiveAt(action, decisionAt);
   const touchesUsed = context.touchesUsed ?? 0;
 
   const pairs = [];
@@ -134,8 +163,14 @@ export function buildFeatures({ diagnosis, observed, action, context = {} }) {
   push('logAmount', (Math.log(amount) - 11) / 3);
 
   // ---- how stale the case is --------------------------------------------------------------
+  /**
+   * MEASURED AT `landsAt`, NOT AT THE DECISION INSTANT, because that is the quantity the label was
+   * drawn against: `responseModel.js` computes `ageDays` from its own `effectiveAt`. A scheduled retry
+   * nine days out is an action taken on a case nine days older, and the cost of that staleness is most
+   * of what makes waiting a real trade-off rather than a free option.
+   */
   const ageDays = observed?.occurredAt
-    ? Math.max(0, (now.getTime() - new Date(observed.occurredAt).getTime()) / DAY_MS)
+    ? Math.max(0, (landsAt.getTime() - new Date(observed.occurredAt).getTime()) / DAY_MS)
     : 0;
   push('ageDays', ageDays / 7);
   // Recovery probability decays exponentially in age, so a linear model needs the nonlinearity
@@ -185,15 +220,20 @@ export function buildFeatures({ diagnosis, observed, action, context = {} }) {
   for (const [n, v] of oneHot('chan', action?.channel, CHANNELS)) push(n, v);
 
   const isScheduled = kind === ActionKind.RETRY_SCHEDULED && action?.scheduledFor;
-  const delayHours = isScheduled
-    ? Math.max(0, (new Date(action.scheduledFor).getTime() - now.getTime()) / 3_600_000)
-    : 0;
-  push('delayDays', delayHours / 24);
+  /**
+   * The wait, in days. Now derived from the two instants rather than from `scheduledFor - context.now`,
+   * which was the same arithmetic but collapsed to zero whenever the caller passed the landing instant
+   * as `now`. A slot already in the past lands immediately, so `effectiveAt` clamps it and the delay is
+   * correctly zero — the one case where a zero here is a fact rather than a bug.
+   */
+  const delayHours = (landsAt.getTime() - decisionAt.getTime()) / 3_600_000;
+  push('delayDays', Math.max(0, delayHours) / 24);
   push('isScheduled', isScheduled ? 1 : 0);
 
   // The observable proxy for an unobservable salary credit. Applied to the time the money would
-  // actually be taken, which for a scheduled retry is the future slot and not now.
-  push('salaryWindow', salaryWindowProximity(isScheduled ? action.scheduledFor : now));
+  // actually be taken, which for a scheduled retry is the future slot and not now. Reads `landsAt`
+  // directly now, which is why this column was the one part of the timing trio that never skewed.
+  push('salaryWindow', salaryWindowProximity(landsAt));
 
   // Retrying the same rail that just failed, versus steering somewhere else. Observable, and the
   // response model penalises the former when the rail itself is the problem.
@@ -213,7 +253,7 @@ export function buildFeatures({ diagnosis, observed, action, context = {} }) {
   // interaction I most expect to matter and want to be able to read off a coefficient.
   push(
     'x:timingSensitive*salaryWindow',
-    (phys.timingSensitive ? 1 : 0) * salaryWindowProximity(isScheduled ? action.scheduledFor : now)
+    (phys.timingSensitive ? 1 : 0) * salaryWindowProximity(landsAt)
   );
   push('x:needsNewInstrument*reauth', (phys.needsNewInstrument ? 1 : 0) * (kind === ActionKind.REQUEST_REAUTH ? 1 : 0));
   push('x:railSwitchHelps*switch', (phys.railSwitchHelps ? 1 : 0) * (kind === ActionKind.SWITCH_RAIL_NUDGE ? 1 : 0));

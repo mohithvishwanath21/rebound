@@ -280,10 +280,22 @@ export function decideDisposition({
 } = {}) {
   const bar = actionThresholdPaise(config.POLICY);
 
+  /**
+   * THE BAR IS PER-CANDIDATE NOW (#52), so read the one the scorer attached and fall back to the
+   * case-level floor only for candidates that were never priced.
+   *
+   * `barPaise` on a candidate is `max(flat floor, k x sigma(EV))`, and sigma(EV) depends on that
+   * action's own probability and support — see `actionThresholdPaise`. The fallback is not defensive
+   * padding: unpriced candidates (FORBID entries that never reached the scorer) legitimately have no
+   * sigma, and they are in this list on purpose so that "everything was blocked" and "everything was
+   * unprofitable" cannot arrive here as the same empty list.
+   */
+  const barFor = (c) => (Number.isFinite(c?.barPaise) ? c.barPaise : bar);
+
   const permitted = scored.filter((c) => c.verdict === 'ALLOW');
   const deferred = scored.filter((c) => c.verdict === 'DEFER');
 
-  const profitable = permitted.filter((c) => c.evPaise >= bar);
+  const profitable = permitted.filter((c) => c.evPaise >= barFor(c));
   if (profitable.length > 0) {
     return { disposition: Disposition.CONTINUE, reason: null, barPaise: bar, calibrationNote: CALIBRATION_NOTE };
   }
@@ -298,7 +310,7 @@ export function decideDisposition({
    * it is a loop. The comparison uses the EV computed at the deferred instant where the caller
    * supplied one.
    */
-  const worthWaitingFor = deferred.filter((c) => c.evPaise >= bar);
+  const worthWaitingFor = deferred.filter((c) => c.evPaise >= barFor(c));
   if (worthWaitingFor.length > 0) {
     const until = new Date(Math.min(...worthWaitingFor.map((c) => new Date(c.deferUntil).getTime())));
     return {
@@ -425,8 +437,19 @@ function diagnoseStopReason({ scored, caseState, diagnosis, config, bar }) {
   }
 
   const best = actionable.reduce((a, b) => (b.evPaise > a.evPaise ? b : a));
+  /**
+   * Report the bar the BEST action actually faced, not the flat floor. Since #52 the bar is
+   * per-candidate, and a trail that says "below the 200 paise bar" about an action that was really
+   * measured against 4,150 paise is not merely imprecise — it invites the reader to conclude the
+   * agent is timid when in fact it was uncertain, which are different problems with different fixes.
+   * `evSigmaPaise` is printed alongside so the reason carries its own arithmetic.
+   */
+  const bestBar = Number.isFinite(best.barPaise) ? best.barPaise : bar;
+  const sigmaNote = Number.isFinite(best.evSigmaPaise)
+    ? ` (bar is ${config.POLICY.evBarSigmaK ?? 0} x sigma of ${Math.round(best.evSigmaPaise)} paise, floored at ${bar})`
+    : '';
   return {
     code: StopReason.NEGATIVE_EV,
-    detail: `best available recovery action (${best.action?.kind}) is worth ${best.evPaise} paise, below the ${bar} paise bar`,
+    detail: `best available recovery action (${best.action?.kind}) is worth ${best.evPaise} paise, below the ${bestBar} paise bar${sigmaNote}`,
   };
 }

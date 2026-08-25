@@ -77,6 +77,7 @@
  *   --step-hours=12    defaults to HORIZON.stepHours
  *   --arms=...         comma-separated subset, for debugging. Dropping B0 makes incremental unavailable.
  *   --now=...          ISO start instant. A fixed default, NOT the wall clock.
+ *   --ev-bar-sigma-k=1 standard errors of headroom the EV bar demands. 0 = the old flat ₹2 bar.
  *   --json             machine-readable, for the dashboard and for diffing runs
  *   --quiet            suppress progress lines
  */
@@ -106,6 +107,7 @@ const f = readFlags(
     'step-hours': String(HORIZON.stepHours),
     arms: ALL_ARM_IDS.join(','),
     now: DEFAULT_NOW,
+    'ev-bar-sigma-k': String(POLICY.evBarSigmaK ?? 0),
   },
   ['json', 'quiet'],
   (raw) => {
@@ -132,7 +134,16 @@ const f = readFlags(
      * `cycles % 2 === 0` test, which is only equivalent to the real constraint at a 09:00 UTC start
      * with a 12h step.
      */
-    return { ...raw, split, seeds, arms, cycles, stepHours: asNumber(raw['step-hours'], 'step-hours', { integer: false, min: 0.25 }), count: asNumber(raw.count, 'count', { min: 1 }) };
+    return {
+      ...raw,
+      split,
+      seeds,
+      arms,
+      cycles,
+      stepHours: asNumber(raw['step-hours'], 'step-hours', { integer: false, min: 0.25 }),
+      count: asNumber(raw.count, 'count', { min: 1 }),
+      evBarSigmaK: asNumber(raw['ev-bar-sigma-k'], 'ev-bar-sigma-k', { integer: false, min: 0 }),
+    };
   }
 );
 
@@ -164,7 +175,16 @@ const evalGuardrails = {
   maxMessagesPerRun: f.count * EVAL_RUN_BREAKER_HEADROOM,
   maxRetriesPerRun: f.count * EVAL_RUN_BREAKER_HEADROOM,
 };
-const config = { GUARDRAILS: evalGuardrails, POLICY };
+/**
+ * `--ev-bar-sigma-k` is the ONLY policy knob this CLI exposes, and it is exposed for one reason: the
+ * support-scaled EV bar (#52) had to be compared against the flat ₹2 bar it replaced, and the
+ * comparison is only worth anything if the world, the model, the luck and the clock are all held
+ * identical while it moves. Passing `--ev-bar-sigma-k=0` reproduces the previous policy exactly, so
+ * the A/B is two invocations of one binary at one commit rather than a diff against a remembered
+ * number. Every other policy value stays at its production setting; a CLI that let a reader tune the
+ * policy until the table looked good would be a worse tool than one that could not be tuned at all.
+ */
+const config = { GUARDRAILS: evalGuardrails, POLICY: { ...POLICY, evBarSigmaK: f.evBarSigmaK } };
 
 /** What the production caps would have been, printed beside the actuals. */
 const PROD_CAPS = { messages: GUARDRAILS.maxMessagesPerRun, retries: GUARDRAILS.maxRetriesPerRun };
