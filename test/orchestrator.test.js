@@ -29,7 +29,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createMemoryStore } from '../src/db/store.js';
-import { runCycle, executeDecision, ExecState } from '../src/agent/orchestrator.js';
+import { runCycle, executeDecision, resolveApproval, ExecState, CaseState } from '../src/agent/orchestrator.js';
 import { ActionKind, CUSTOMER_CONTACTING, MONEY_MOVING } from '../src/core/actions.js';
 import { GUARDRAILS, POLICY } from '../src/core/config.js';
 import { ReceiptState, validateActionRequest } from '../src/razorpay/gateway.js';
@@ -588,4 +588,337 @@ test('a scheduled retry sets a wakeup, touches no gateway, and is re-decided rat
     ActionKind.RETRY_SCHEDULED,
     'executing the stored intent would mean the guardrails were last checked three days ago'
   );
+});
+
+// =============================================================================================
+// DAY 8 — THE POLICY IS AN ARGUMENT, AND IT HAS TO GOVERN THE PASS THAT EXECUTES
+// =============================================================================================
+/**
+ * `runCycle` decides twice: a propose pass that only produces an ordering, and a commit pass whose
+ * guardrail check is authoritative and whose output is what actually gets executed. Day 8 made the
+ * policy injectable so baselines can run through this exact loop.
+ *
+ * The failure mode being pinned is specific and quiet: wire `decide` into the propose pass only, and
+ * a baseline arm gets to choose the QUEUE ORDER while `decideForCase` still chooses every action
+ * that runs. The comparison then reports two arms doing the same thing, one of them under a baseline
+ * label, and every number it prints is well-formed.
+ */
+
+test('an injected policy governs the pass that executes, not merely the ordering', async () => {
+  /**
+   * PART 1 — establish that this fixture WOULD act under the default policy.
+   *
+   * Without this half, the assertion below ("the gateway was never called") passes for the wrong
+   * reason on any fixture the real policy declines. Asserting a zero is only meaningful once the
+   * non-zero has been demonstrated on the same inputs.
+   */
+  const storeA = createMemoryStore();
+  await seedCases(storeA, 'r1', [{ eventId: 'e1' }, { eventId: 'e2' }]);
+  const gatewayA = stubGateway({ capture: true });
+
+  const base = (store) => ({
+    store,
+    runId: 'r1',
+    config,
+    scoreAction: scorerByAmount(),
+    observeCase: (c) => observedCase({ eventId: c.eventId, customerId: c.customerId, amountPaise: c.amountPaise }),
+    diagnoseCase: diagnosisFor,
+    cycle: 0,
+    now: NOW,
+  });
+
+  await runCycle({ ...base(storeA), gateway: gatewayA });
+  assert.ok(
+    gatewayA.calls.length > 0,
+    'PRECONDITION FAILED: the default policy declines this fixture, so the injection test below ' +
+      'would pass trivially. Fix the fixture, not the assertion.'
+  );
+
+  // ---- PART 2 — the same fixture, with a policy that refuses everything ----------------------
+  const storeB = createMemoryStore();
+  await seedCases(storeB, 'r1', [{ eventId: 'e1' }, { eventId: 'e2' }]);
+  const gatewayB = stubGateway({ capture: true });
+
+  /** A minimal do-nothing policy, in the shape `decideForCase` returns. */
+  const refuseEverything = ({ observed }) => ({
+    eventId: observed.eventId,
+    outcome: 'STOP_PERMANENT',
+    decisionSeq: 0,
+    chosen: null,
+    candidates: [],
+    barPaise: 200,
+    amountPaise: observed.amountPaise,
+    policyArm: 'TEST_REFUSE_ALL',
+  });
+
+  const cycle = await runCycle({ ...base(storeB), gateway: gatewayB, decide: refuseEverything });
+
+  assert.equal(
+    gatewayB.calls.length,
+    0,
+    `the injected policy stopped every case, so nothing may reach the gateway. ${gatewayB.calls.length} ` +
+      'call(s) got through, which means the commit pass is still calling decideForCase — a baseline ' +
+      'would silently be scored as REBOUND_EV.'
+  );
+  assert.equal(cycle.executed.length, 2, 'both cases must still be decided and recorded');
+  for (const x of cycle.executed) {
+    assert.equal(x.decision.outcome, 'STOP_PERMANENT');
+    assert.equal(x.decision.policyArm, 'TEST_REFUSE_ALL', 'the stored decision must be the injected one');
+  }
+});
+
+test('the injected policy is consulted in both passes, once per case per pass', async () => {
+  /**
+   * Two cases, one cycle, so a policy used in both passes is called exactly four times. Three would
+   * mean a pass is skipping a case; two would mean only one pass is using it.
+   *
+   * `divergedFromProposal` must also be false here: the same policy against the same state must
+   * reach the same conclusion twice, and a spurious divergence would mean the propose and commit
+   * passes are being handed different inputs.
+   */
+  const store = createMemoryStore();
+  await seedCases(store, 'r1', [{ eventId: 'e1' }, { eventId: 'e2' }]);
+  const gateway = stubGateway();
+
+  const seen = [];
+  const counting = ({ observed }) => {
+    seen.push(observed.eventId);
+    return {
+      eventId: observed.eventId,
+      outcome: 'WAIT',
+      decisionSeq: 0,
+      chosen: null,
+      candidates: [],
+      barPaise: 200,
+      amountPaise: observed.amountPaise,
+    };
+  };
+
+  const cycle = await runCycle({
+    store,
+    gateway,
+    runId: 'r1',
+    now: NOW,
+    config,
+    scoreAction: scorerByAmount(),
+    observeCase: (c) => observedCase({ eventId: c.eventId, customerId: c.customerId, amountPaise: c.amountPaise }),
+    diagnoseCase: diagnosisFor,
+    decide: counting,
+    cycle: 0,
+  });
+
+  assert.equal(seen.length, 4, `expected 2 cases x 2 passes = 4 calls, got ${seen.length}: ${seen.join(',')}`);
+  assert.deepEqual(
+    [...new Set(seen)].sort(),
+    ['e1', 'e2'],
+    'both cases must be seen by both passes'
+  );
+  assert.equal(
+    cycle.executed.filter((x) => x.divergedFromProposal).length,
+    0,
+    'one policy against one unchanged state must not disagree with itself between passes'
+  );
+});
+
+test('runCycle refuses a non-function policy rather than falling back to the default', async () => {
+  /**
+   * Falling back would be the dangerous kindness: a typo in the arm wiring would run REBOUND_EV
+   * under a baseline label and report it as a baseline result.
+   */
+  const store = createMemoryStore();
+  await seedCases(store, 'r1', [{ eventId: 'e1' }]);
+  await assert.rejects(
+    () => runCycle({
+      store,
+      gateway: stubGateway(),
+      runId: 'r1',
+      now: NOW,
+      config,
+      scoreAction: scorerByAmount(),
+      observeCase: (c) => observedCase({ eventId: c.eventId }),
+      diagnoseCase: diagnosisFor,
+      decide: 'B1_NAIVE_RETRY',
+    }),
+    /decide.*must be a function/,
+    'a policy that is not callable must be a loud error'
+  );
+});
+
+// ---------------------------------------------------------------------------------------------
+// THE APPROVAL LIFECYCLE — request, grant, act; or request, deny, close
+// ---------------------------------------------------------------------------------------------
+//
+// This block exists because of a defect measured on the day-7 batch: 16 of 80 cases held
+// ₹16,77,043 — 92.9% of total exposure — above the ₹25,000 approval threshold, and every one of
+// them was frozen forever. `AWAITING_APPROVAL` was reachable and nothing could leave it. Worse, it
+// was invisible from every angle a reviewer would look: the run reported healthy guardrails, a
+// sensible action mix, zero violations, and a recovery figure. It just quietly declined to chase
+// nearly all of the money while reporting itself as compliant.
+//
+// The end-to-end test below is the one that fails if any link in the chain breaks — the request,
+// the queue read, the grant, the guardrail's recognition of the grant, or the re-decide. Unit
+// tests on each link would each have passed while the chain stayed broken, which is roughly what
+// happened.
+
+/** ₹3,00,000 — the p100 case in the real batch, and comfortably over the ₹25,000 threshold. */
+const OVER_THRESHOLD = GUARDRAILS.humanApprovalThresholdPaise * 12;
+
+test('a case over the threshold is held for a human, and a grant lets it act', async () => {
+  const store = createMemoryStore();
+  await seedCases(store, 'r1', [{ eventId: 'e_big', amountPaise: OVER_THRESHOLD }]);
+  const gateway = stubGateway({ capture: true });
+
+  // ---- cycle 0: the agent proposes and stops, because this is not its call to make.
+  const first = await runCycle({ ...runArgs(store, gateway, config), cycle: 0 });
+  assert.equal(first.summary.attempts, 0, 'nothing may execute before a human answers');
+
+  const held = await store.getCase('r1', 'e_big');
+  assert.equal(held.state, CaseState.AWAITING_APPROVAL);
+  assert.equal(held.approval.state, 'PENDING');
+  assert.deepEqual(held.approval.checkIds, ['APR_LARGE_AMOUNT'], 'the queue records what it is asking about');
+  assert.ok(held.approval.proposedAction, 'and what it proposed, so the reviewer sees a decision not a riddle');
+  assert.equal(
+    held.approval.proposedInvasiveness,
+    2,
+    'and how invasive it is, which is the envelope the grant will be bounded by'
+  );
+
+  // ---- the queue a human actually works.
+  const queue = await store.getPendingApprovals('r1');
+  assert.equal(queue.length, 1);
+  assert.equal(queue[0].eventId, 'e_big');
+
+  // ---- a human grants it.
+  const res = await resolveApproval({
+    store, runId: 'r1', eventId: 'e_big', grant: true, by: 'priya@example.com', at: NOW,
+  });
+  assert.deepEqual(res, { applied: true, state: 'GRANTED' });
+
+  const granted = await store.getCase('r1', 'e_big');
+  assert.equal(granted.state, CaseState.OPEN, 'a granted case rejoins the work queue');
+  assert.equal(granted.approval.state, 'GRANTED');
+  assert.equal(granted.nextActionAt, null, 'and is due immediately, not on the old schedule');
+
+  // ---- cycle 1: THE PAYOFF. The money moves, under a name.
+  const second = await runCycle({ ...runArgs(store, gateway, config), cycle: 1 });
+  assert.equal(second.summary.attempts, 1, 'the whole point: a granted case executes');
+
+  const acted = await store.getCase('r1', 'e_big');
+  assert.equal(acted.state, CaseState.RECOVERED, `expected recovery, got ${acted.state}`);
+
+  const decisions = await store.getDecisions('r1', 'e_big');
+  const executing = decisions.at(-1);
+  assert.deepEqual(executing.clearedByApproval, ['APR_LARGE_AMOUNT']);
+  assert.equal(executing.approvedBy, 'priya@example.com', 'the executing decision names the signer');
+
+  const audit = await store.getAudit('r1', { type: 'APPROVAL_GRANTED' });
+  assert.equal(audit.length, 1);
+  assert.equal(audit[0].detail.by, 'priya@example.com');
+  assert.deepEqual(audit[0].detail.clearedCheckIds, ['APR_LARGE_AMOUNT']);
+  assert.ok(audit[0].detail.validUntil, 'a grant that never expires is permanent authority obtained once');
+});
+
+test('a pending case is not re-proposed on every cycle', async () => {
+  /**
+   * The measured symptom that exposed the defect: 21 pending cases generated 171
+   * APPROVAL_REQUESTED entries across 8 cycles — one per case per cycle. Two harms, and the
+   * quieter one is worse. A queue that re-raises every item on every cycle is not a queue a human
+   * can work; and "how many approvals did this policy demand?" becomes a function of how long the
+   * run was rather than of the policy, which would have made the approval column of the five-arm
+   * comparison meaningless.
+   */
+  const store = createMemoryStore();
+  await seedCases(store, 'r1', [{ eventId: 'e_big', amountPaise: OVER_THRESHOLD }]);
+  const gateway = stubGateway();
+
+  for (let cycle = 0; cycle < 5; cycle += 1) {
+    await runCycle({ ...runArgs(store, gateway, config), cycle });
+  }
+
+  const requests = await store.getAudit('r1', { type: 'APPROVAL_REQUESTED' });
+  assert.equal(requests.length, 1, `asked once, not once per cycle (got ${requests.length})`);
+
+  // Still unresolved, so still ACTIVE — a run must not consider itself finished while a human owes
+  // it an answer — but not DUE, because re-deciding could only produce the same request again.
+  const active = await store.getActiveCases('r1');
+  const due = await store.getDueCases('r1', new Date(NOW.getTime() + 30 * 86_400_000));
+  assert.equal(active.length, 1, 'unresolved: the run is not finished');
+  assert.equal(due.length, 0, 'but not ours to move');
+});
+
+test('a denial closes the case instead of re-proposing something cheaper', async () => {
+  /**
+   * Per-action denial is deliberately not built. "You may not charge ₹3,00,000, but may I send a
+   * WhatsApp?" hands the agent a way to grind down a refusal one rung at a time, and a reviewer who
+   * said no does not expect to be asked again in a smaller voice.
+   */
+  const store = createMemoryStore();
+  await seedCases(store, 'r1', [{ eventId: 'e_big', amountPaise: OVER_THRESHOLD }]);
+  const gateway = stubGateway();
+
+  await runCycle({ ...runArgs(store, gateway, config), cycle: 0 });
+  const res = await resolveApproval({
+    store, runId: 'r1', eventId: 'e_big', grant: false, by: 'priya@example.com', at: NOW, note: 'customer in hardship',
+  });
+  assert.deepEqual(res, { applied: true, state: 'DENIED' });
+
+  const closed = await store.getCase('r1', 'e_big');
+  assert.equal(closed.state, CaseState.STOPPED);
+  assert.equal(closed.approval.state, 'DENIED');
+  assert.equal(closed.approval.note, 'customer in hardship');
+  assert.equal(closed.stop.code, 'APPROVAL_DENIED');
+  assert.equal(closed.nextActionAt, null);
+
+  // And it stays closed: further cycles must not resurrect it.
+  await runCycle({ ...runArgs(store, gateway, config), cycle: 1 });
+  const after = await store.getCase('r1', 'e_big');
+  assert.equal(after.state, CaseState.STOPPED, 'a denial is terminal');
+  const denials = await store.getAudit('r1', { type: 'APPROVAL_DENIED' });
+  assert.equal(denials.length, 1);
+  assert.equal(denials[0].detail.by, 'priya@example.com');
+});
+
+test('resolveApproval is idempotent and refuses to answer a question nobody asked', async () => {
+  /**
+   * A double-clicked Approve button, a retried HTTP request, or a case that self-recovered while
+   * sitting in the queue. Without this guard the second call re-opens a case the customer already
+   * paid, and stamps a fresh grant onto it.
+   */
+  const store = createMemoryStore();
+  await seedCases(store, 'r1', [{ eventId: 'e_big', amountPaise: OVER_THRESHOLD }, { eventId: 'e_small' }]);
+  const gateway = stubGateway();
+  await runCycle({ ...runArgs(store, gateway, config), cycle: 0 });
+
+  const first = await resolveApproval({ store, runId: 'r1', eventId: 'e_big', grant: true, by: 'priya', at: NOW });
+  assert.equal(first.applied, true);
+
+  const second = await resolveApproval({ store, runId: 'r1', eventId: 'e_big', grant: true, by: 'priya', at: NOW });
+  assert.equal(second.applied, false, 'the second click must be a no-op, not a second grant');
+  assert.match(second.because, /only a PENDING request/);
+
+  // A case that never asked cannot be granted either — that would be a signature on a decision
+  // nobody proposed.
+  const small = await resolveApproval({ store, runId: 'r1', eventId: 'e_small', grant: true, by: 'priya', at: NOW });
+  assert.equal(small.applied, false);
+
+  const grants = await store.getAudit('r1', { type: 'APPROVAL_GRANTED' });
+  assert.equal(grants.length, 1, 'exactly one grant in the audit trail');
+});
+
+test('resolveApproval refuses an anonymous grant', async () => {
+  /**
+   * Accountability is the only thing an approval record is for. An approval that cannot name who
+   * gave it is strictly worse than no approval step at all: the action still executes, and now
+   * there is a record implying someone authorised it.
+   */
+  const store = createMemoryStore();
+  await seedCases(store, 'r1', [{ eventId: 'e_big', amountPaise: OVER_THRESHOLD }]);
+  await runCycle({ ...runArgs(store, stubGateway(), config), cycle: 0 });
+
+  await assert.rejects(
+    () => resolveApproval({ store, runId: 'r1', eventId: 'e_big', grant: true, at: NOW }),
+    TypeError
+  );
+  const held = await store.getCase('r1', 'e_big');
+  assert.equal(held.approval.state, 'PENDING', 'the refused call must not have half-applied');
 });

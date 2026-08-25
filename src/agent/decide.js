@@ -81,6 +81,134 @@ export function candidatesFor(now, policy = POLICY) {
 }
 
 /**
+ * IS THIS CANDIDATE A POSTPONEMENT, and of what?
+ *
+ * An action postpones if it carries its own future execution instant. Today only RETRY_SCHEDULED
+ * does, but the test is written against the PROPERTY rather than the enum member so that a
+ * scheduled payment link added later is covered by the rule instead of quietly escaping it.
+ *
+ * The class is the action KIND, not the signature. `RETRY_SCHEDULED:2026-03-02T15:00` and
+ * `RETRY_SCHEDULED:2026-03-03T03:00` are one intent re-armed at a new instant, and counting
+ * signatures would read sixteen identical decisions as sixteen different ones — which is precisely
+ * how the loop stayed invisible: every line in the audit trail was unique.
+ *
+ * A guardrail DEFER is NOT a postponement by this definition and must never be counted as one. A
+ * quiet-hours deferral is the compliance engine telling us when we may act; it is not the policy
+ * choosing to think about it later, and conflating the two would make the agent unable to wait for
+ * 09:00 — turning a fix for procrastination into a fix for legality.
+ */
+export const deferralClassOf = (action) => (action?.scheduledFor ? action.kind : null);
+
+/**
+ * WITHHOLD THE POSTPONEMENTS A CASE IS NO LONGER ENTITLED TO — the #67 fix.
+ *
+ * Two independent mechanisms, and they are kept separate because they answer different questions
+ * and a single combined rule would make it impossible to tell from the trail which one bound.
+ *
+ * COMMITMENT. If the case is standing on an instant IT CHOSE for itself, it may not spend that
+ * wakeup re-arming the same class of action. This is the actual fix. `EV(retry in 6h) > EV(retry
+ * now)` is a true statement at every instant, so a policy free to re-derive it will re-derive it
+ * forever; the inequality has no clock in it. Removing the option at the landing instant forces the
+ * comparison to be between things that can actually happen now.
+ *
+ * BUDGET. `POLICY.maxDeferralsPerCase` caps same-class postponements however they were reached.
+ * Strictly a backstop: if some path reaches the loop without ever landing on its own wakeup, the
+ * commitment rule never fires and this still bounds it. A rule I can only defend on paths I
+ * thought of is a rule I will find a counterexample to later.
+ *
+ * WHAT IS DELIBERATELY PRESERVED. Re-decision is untouched — belief, guardrails and the approval
+ * envelope are all re-evaluated at the landing instant, exactly as #37 requires, so a three-day-old
+ * intent still never authorises a charge. Withholding is also scoped to the class deferred: waking
+ * from a retry deferral leaves every contacting action, RETRY_NOW, escalation and stopping fully
+ * available. Broadening it to "a woken case may only retry-now or stop" would delete SEND_LINK from
+ * the action space on most of the batch and move the recovery figure for a reason unrelated to this
+ * bug.
+ *
+ * WHY WITHHELD CANDIDATES ARE NOT GIVEN `Verdict.FORBID`. FORBID is the compliance verdict, and
+ * `guardrailRefusals` is a headline metric — routing a policy decision through it would inflate the
+ * count of times the agent was stopped by a RULE, which is the one number in this project that has
+ * to stay clean. A deferral limit is policy, so it is reported as its own thing and counted
+ * separately.
+ *
+ * @returns `{ eligible, withheld, deferralLimit }` — `withheld` entries carry their own reason, and
+ *          `deferralLimit` is null unless something was ACTUALLY withheld, so the orchestrator
+ *          never emits a refusal event for a bar that had nothing to bite on.
+ */
+export function applyDeferralLimits({ list = [], caseState = {}, now = new Date(), policy = POLICY } = {}) {
+  const cap = policy?.maxDeferralsPerCase;
+  const counts = caseState.deferralCounts ?? {};
+  const nowMs = new Date(now).getTime();
+  const wakeMs = caseState.deferralWakeAt ? new Date(caseState.deferralWakeAt).getTime() : NaN;
+
+  /** class -> the bar that applies to it */
+  const bars = new Map();
+
+  /**
+   * `>=`, not `>`. The case is due at exactly its chosen instant and the orchestrator's clock steps
+   * in whole cycles, so a strict comparison would miss the common case — the wakeup landing on the
+   * dot — which is the only case that matters.
+   */
+  const standingOnItsOwnWakeup = Number.isFinite(wakeMs) && nowMs >= wakeMs;
+  if (standingOnItsOwnWakeup && caseState.deferredClass) {
+    const cls = caseState.deferredClass;
+    bars.set(cls, {
+      boundBy: 'COMMITMENT',
+      class: cls,
+      count: counts[cls] ?? 0,
+      cap: Number.isFinite(cap) ? cap : null,
+      because:
+        `this case is being decided at ${new Date(wakeMs).toISOString()}, the instant it chose for ` +
+        `itself when it last deferred ${cls}. It may act, escalate or stop, but it may not postpone ` +
+        `${cls} again — a preference for waiting that does not depend on the clock never resolves.`,
+    });
+  }
+
+  if (Number.isFinite(cap)) {
+    for (const [cls, n] of Object.entries(counts)) {
+      if (n >= cap && !bars.has(cls)) {
+        bars.set(cls, {
+          boundBy: 'BUDGET',
+          class: cls,
+          count: n,
+          cap,
+          because:
+            `this case has already postponed ${cls} ${n} time(s), reaching the ` +
+            `POLICY.maxDeferralsPerCase limit of ${cap}. Further postponement is refused as policy, ` +
+            `not as a compliance rule, so the case must now act, escalate or stop.`,
+        });
+      }
+    }
+  }
+
+  if (bars.size === 0) return { eligible: list, withheld: [], deferralLimit: null };
+
+  const eligible = [];
+  const withheld = [];
+  for (const action of list) {
+    const cls = deferralClassOf(action);
+    const bar = cls ? bars.get(cls) : null;
+    if (bar) withheld.push({ action, bar });
+    else eligible.push(action);
+  }
+
+  if (withheld.length === 0) return { eligible, withheld, deferralLimit: null };
+
+  /**
+   * COMMITMENT is reported ahead of BUDGET when both withheld something, because it is the
+   * mechanism that fired at THIS instant and the one a reviewer needs to see. `all` carries every
+   * bar regardless, so a multi-class refusal is never reduced to its first line.
+   */
+  const bit = [...bars.values()].filter((b) => withheld.some((w) => w.bar === b));
+  const primary = bit.find((b) => b.boundBy === 'COMMITMENT') ?? bit[0];
+
+  return {
+    eligible,
+    withheld,
+    deferralLimit: { ...primary, withheldCandidates: withheld.length, all: bit },
+  };
+}
+
+/**
  * IDEMPOTENCY KEY MINTING, AND THE HAZARD IT ONLY PARTLY SOLVES.
  *
  * Deterministic in (eventId, action, attempt ordinal), so re-deciding the same case at the same
@@ -141,9 +269,30 @@ export function decideForCase({
   const bar = actionThresholdPaise(config.POLICY);
   const list = candidates ?? candidatesFor(decidedAt, config.POLICY);
 
+  /**
+   * Postponements this case is no longer entitled to are removed BEFORE the pricing loop, not given
+   * a losing verdict inside it. Two reasons, and the second is the one that matters.
+   *
+   * A withheld option must not carry a price. A number beside an option we are refusing to take
+   * invites exactly the comparison the rule exists to forbid, and the next reader of the trail would
+   * reasonably ask why the highest-EV row was not chosen.
+   *
+   * And `scored` feeds the stopping rules. `decideDisposition` reads verdicts and `diagnoseStopReason`
+   * reduces over `evPaise` to name the best action we declined — an entry with a null price in that
+   * reduction produces "best available recovery action is worth null paise", which is a false
+   * sentence about a real stop. Keeping the withheld set out of `scored` entirely means every
+   * downstream rule sees precisely what it saw before this fix existed.
+   */
+  const { eligible, withheld, deferralLimit } = applyDeferralLimits({
+    list,
+    caseState,
+    now: decidedAt,
+    policy: config.POLICY,
+  });
+
   const scored = [];
 
-  for (const raw of list) {
+  for (const raw of eligible) {
     /**
      * Every action with an irreversible outbound side effect carries its key from the moment it
      * becomes a candidate, so ABS_IDEMPOTENCY_KEY is checking a real property rather than one this
@@ -254,6 +403,15 @@ export function decideForCase({
       evaluated: guard.evaluated,
       requiresApproval: withBelief.requiresApproval,
       approvalReasons: withBelief.approvalReasons,
+      /**
+       * Carried alongside the prose reasons so `applyNonActingOutcome` can record a grant against
+       * the exact checks a reviewer was shown, and `clearedByApproval` so the trail can show which
+       * concerns an existing signature already answered rather than making a cleared check look
+       * like a check that never applied.
+       */
+      approvalCheckIds: withBelief.approvalCheckIds,
+      clearedByApproval: withBelief.clearedByApproval,
+      approvedBy: withBelief.approvedBy,
     });
   }
 
@@ -393,9 +551,25 @@ export function decideForCase({
 
     requiresApproval: Boolean(chosen?.requiresApproval) || outcome === Outcome.AWAIT_APPROVAL,
     approvalReasons: chosen?.approvalReasons ?? [],
+    approvalCheckIds: chosen?.approvalCheckIds ?? [],
+    /**
+     * Which approval concerns a human had already signed off, and who signed. Printed in the trail
+     * because "this ₹2,99,915 retry executed automatically" and "this ₹2,99,915 retry executed
+     * because Priya approved it at 10:14 on the 3rd" are the same event and completely different
+     * facts, and only one of them is defensible.
+     */
+    clearedByApproval: chosen?.clearedByApproval ?? [],
+    approvedBy: chosen?.approvedBy ?? null,
 
     barPaise: bar,
     calibrationNote: CALIBRATION_NOTE,
+
+    /**
+     * Which deferral mechanism bound, or null. Read by the orchestrator to emit DEFERRAL_REFUSED —
+     * a refusal that appears only as an ABSENCE in the candidate list is a trail where two cycles
+     * look like two unrelated decisions with no stated reason for differing.
+     */
+    deferralLimit: deferralLimit ?? null,
 
     // The audit surface. Ranked, priced where pricing was legitimate, with a reason per line.
     //
@@ -424,7 +598,40 @@ export function decideForCase({
       rejectedBecause: c.rejectedBecause ?? null,
       violations: c.violations.map((v) => ({ id: v.id, kind: v.kind, message: v.message })),
       requiresApproval: c.requiresApproval,
-    })),
+    }))
+      /**
+       * The withheld postponements, appended last and never priced. They are in the trail because a
+       * decision that silently drops the option it would otherwise have taken is LESS explainable
+       * than one that never had it: a reviewer comparing this cycle with the previous one can see
+       * only that the winner changed, with nothing on the page saying why.
+       *
+       * `eligible: false` rather than a verdict, because verdicts belong to the compliance engine.
+       */
+      .concat(
+        withheld.map(({ action, bar: barred }) => ({
+          rank: null,
+          signature: actionSignature(action),
+          kind: action.kind,
+          channel: action.channel ?? null,
+          scheduledFor: action.scheduledFor ?? null,
+          verdict: null,
+          eligible: false,
+          priced: false,
+          evPaise: null,
+          grossPaise: null,
+          totalCostPaise: null,
+          p: null,
+          support: null,
+          timing: null,
+          deferUntil: null,
+          chosen: false,
+          rejectedBecause:
+            `withheld by the deferral limit (${barred.boundBy}): ${barred.because}`,
+          violations: [],
+          requiresApproval: false,
+          deferralLimit: { boundBy: barred.boundBy, class: barred.class, count: barred.count, cap: barred.cap },
+        }))
+      ),
 
     /**
      * Every rule that was evaluated for the chosen action, including the ones that did not

@@ -68,6 +68,9 @@ import { assertPaise } from '../core/money.js';
  * @property {(runId: string, eventId: string, patch: object) => Promise<void>} patchCase
  * @property {(runId: string) => Promise<object[]>} getCases
  * @property {(runId: string) => Promise<object[]>} getActiveCases
+ * @property {(runId: string) => Promise<object[]>} getPendingApprovals cases held for a human,
+ *           oldest request first. `getActiveCases` includes these (they are unresolved) but
+ *           `getDueCases` excludes them (re-deciding one can only re-raise the same request).
  *
  * Decisions, actions, audit
  * @property {(decision: object) => Promise<void>} putDecision
@@ -159,7 +162,31 @@ export function createMemoryStore() {
 
   const caseKey = (runId, eventId) => `${runId}::${eventId}`;
 
-  const TERMINAL = new Set(['RECOVERED', 'STOPPED', 'ESCALATED', 'EXPIRED']);
+  /**
+   * States after which a case is finished and must stop being handed to the policy.
+   *
+   * `RECOVERED_SELF` belongs here for a reason worth stating: it is the one terminal state NOT
+   * produced by the agent. Omit it and `getActiveCases` keeps returning a case the customer already
+   * paid, the policy keeps deciding on it every cycle, and the run either never terminates or spends
+   * real attempts dunning someone who settled — while the summary still prints a tidy recovery figure.
+   */
+  const TERMINAL = new Set(['RECOVERED', 'RECOVERED_SELF', 'STOPPED', 'ESCALATED', 'EXPIRED']);
+
+  /**
+   * States where the case is unfinished but the next move is not ours.
+   *
+   * Separate from TERMINAL because the two answer different questions, and conflating them breaks
+   * something in each direction. A case awaiting approval is still ACTIVE — it is unresolved, it
+   * belongs in the queue a human is working, and a run must not consider itself finished while
+   * requests are outstanding — but it is not DUE, because re-deciding it cannot produce anything
+   * except the same request again.
+   *
+   * Measured before this existed: 21 cases awaiting approval generated 171 APPROVAL_REQUESTED
+   * entries over 8 cycles, one per case per cycle. An approval queue that re-raises every pending
+   * item on every cycle is not a queue a human can work, and the duplicates would also have made
+   * "how many approvals did this policy demand?" a function of cycle count rather than of policy.
+   */
+  const BLOCKED_ON_HUMAN = new Set(['AWAITING_APPROVAL']);
 
   return {
     kind: 'MEMORY',
@@ -239,7 +266,24 @@ export function createMemoryStore() {
       return [...(casesByRun.get(runId) ?? [])]
         .map((k) => cases.get(k))
         .filter((c) => !TERMINAL.has(c.state))
+        .filter((c) => !BLOCKED_ON_HUMAN.has(c.state))
         .filter((c) => !c.nextActionAt || new Date(c.nextActionAt).getTime() <= t)
+        .map(clone);
+    },
+
+    /**
+     * The approval queue, oldest request first.
+     *
+     * A named method rather than a `getCases().filter(...)` at each call site, because this is the
+     * one read that both the dashboard and the eval's simulated approver depend on, and they must
+     * agree exactly about what "pending" means. Sorted oldest-first so that a reviewer working the
+     * queue top-down clears the longest-waiting case rather than the largest or the newest.
+     */
+    async getPendingApprovals(runId) {
+      return [...(casesByRun.get(runId) ?? [])]
+        .map((k) => cases.get(k))
+        .filter((c) => c.state === 'AWAITING_APPROVAL' && c.approval?.state === 'PENDING')
+        .sort((a, b) => new Date(a.approval.requestedAt ?? 0) - new Date(b.approval.requestedAt ?? 0))
         .map(clone);
     },
 

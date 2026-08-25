@@ -36,6 +36,8 @@ import {
   RULES,
   APPROVAL_CHECKS,
   effectiveAt,
+  InvasivenessLevel,
+  invasivenessOf,
 } from '../src/agent/guardrails.js';
 import { ActionKind, Channel } from '../src/core/actions.js';
 import { GUARDRAILS, POLICY } from '../src/core/config.js';
@@ -610,6 +612,280 @@ test('a weak or abstained diagnosis requires approval for money movement only', 
    */
   const msg = checkGuardrails({ action: link(), caseState: cs(), diagnosis: weak, now: NOON_IST, config: CONFIG });
   assert.equal(msg.requiresApproval, false);
+});
+
+// ---------------------------------------------------------------------------------------------
+// THE APPROVAL ENVELOPE — what a grant does and, mostly, what it does not do
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * A grant as a human's signature would be recorded: the specific checks the reviewer was shown,
+ * the invasiveness of the action they were shown, who signed, and when.
+ */
+function grant(overrides = {}) {
+  return {
+    state: 'GRANTED',
+    by: 'priya@example.com',
+    grantedAt: NOON_IST,
+    clearedCheckIds: ['APR_LARGE_AMOUNT'],
+    approvedInvasiveness: InvasivenessLevel.MONEY,
+    ...overrides,
+  };
+}
+
+const HUGE = GUARDRAILS.humanApprovalThresholdPaise * 12; // ~₹3,00,000, the p100 case in the batch
+
+test('a live grant lets the money move, and says whose signature moved it', () => {
+  /**
+   * THE TEST THIS WHOLE MECHANISM EXISTS FOR, and the one whose absence hid a real defect.
+   *
+   * Measured before the grant path existed: 16 of 80 cases held ₹16,77,043 — 92.9% of the entire
+   * batch exposure — above the approval threshold, and every one of them sat in the queue forever
+   * because nothing could ever clear the check. An approval gate with no grant path is not a
+   * control, it is a leak that reports itself as caution.
+   *
+   * Note what is asserted: not merely that the action is ALLOWED (it always was — approval is not
+   * a veto, per the pin above), but that `requiresApproval` goes FALSE so the orchestrator stops
+   * re-queueing it, and that the audit trail names the signer.
+   */
+  const before = checkGuardrails({
+    action: retry(),
+    caseState: cs({ amountPaise: HUGE }),
+    now: NOON_IST,
+    config: CONFIG,
+  });
+  assert.equal(before.requiresApproval, true, 'without a grant this case is held — the premise');
+
+  const after = checkGuardrails({
+    action: retry(),
+    caseState: cs({ amountPaise: HUGE, approval: grant() }),
+    now: NOON_IST,
+    config: CONFIG,
+  });
+
+  assert.equal(after.requiresApproval, false, 'a granted case must not bounce straight back into the queue');
+  assert.deepEqual(after.approvalReasons, []);
+  assert.deepEqual(after.clearedByApproval, ['APR_LARGE_AMOUNT'], 'the cleared check is named, not merely absent');
+  assert.equal(after.approvedBy, 'priya@example.com', 'an audit trail that cannot name the signer is not one');
+  assert.equal(after.verdict, Verdict.ALLOW);
+});
+
+test('a grant to contact the customer is not a grant to charge their card', () => {
+  /**
+   * The invasiveness ladder. A reviewer who approved a WhatsApp nudge on a ₹3,00,000 case has
+   * consented to a 35-paise message, and reading that as consent to attempt the charge is how an
+   * approval control becomes worse than no approval control — it manufactures a signature for a
+   * decision nobody made.
+   *
+   * Both branches below carry an otherwise-identical live grant clearing the same check id. Only
+   * the ceiling differs, so nothing except the ladder could separate them.
+   */
+  const contactOnly = grant({ approvedInvasiveness: InvasivenessLevel.CONTACT });
+
+  const message = checkGuardrails({
+    action: link(),
+    caseState: cs({ amountPaise: HUGE, approval: contactOnly }),
+    now: NOON_IST,
+    config: CONFIG,
+  });
+  assert.equal(message.requiresApproval, false, 'the message they approved goes out');
+  assert.deepEqual(message.clearedByApproval, ['APR_LARGE_AMOUNT']);
+
+  const charge = checkGuardrails({
+    action: retry(),
+    caseState: cs({ amountPaise: HUGE, approval: contactOnly }),
+    now: NOON_IST,
+    config: CONFIG,
+  });
+  assert.equal(charge.requiresApproval, true, 'the charge they did not approve is held');
+  assert.deepEqual(charge.clearedByApproval, [], 'and is not recorded as cleared by anyone');
+  assert.equal(charge.approvedBy, 'priya@example.com', 'the grant is still live — it just does not reach this far');
+});
+
+test('the invasiveness ladder orders contact below money', () => {
+  assert.ok(
+    invasivenessOf(ActionKind.SEND_LINK) < invasivenessOf(ActionKind.RETRY_NOW),
+    'if these ever compare equal, a message grant silently authorises a charge'
+  );
+  assert.equal(invasivenessOf({ kind: ActionKind.RETRY_NOW }), InvasivenessLevel.MONEY, 'accepts an action or a kind');
+  assert.equal(invasivenessOf(ActionKind.NO_ACTION_YET), InvasivenessLevel.NONE);
+});
+
+test('a grant expires, and an expiring grant re-gates the case rather than failing open', () => {
+  /**
+   * Nine days after a reviewer signed off on retrying a card, the customer may have paid,
+   * disputed, or churned — and the reviewer would want to be asked again. A grant with no expiry
+   * is permanent authority obtained once, which is the shape of every real approval-control
+   * failure. The important half of this test is the last assertion: expiry must send the case back
+   * to a human, not quietly let the action through unsigned.
+   */
+  const hours = GUARDRAILS.approvalValidForHours;
+  const at = (h) => new Date(new Date(NOON_IST).getTime() + h * 3_600_000).toISOString();
+
+  const justInside = checkGuardrails({
+    action: retry(),
+    caseState: cs({ amountPaise: HUGE, approval: grant() }),
+    now: at(hours - 1),
+    config: CONFIG,
+  });
+  assert.equal(justInside.requiresApproval, false, `a grant is still good at ${hours - 1}h`);
+
+  const justOutside = checkGuardrails({
+    action: retry(),
+    caseState: cs({ amountPaise: HUGE, approval: grant() }),
+    now: at(hours + 1),
+    config: CONFIG,
+  });
+  assert.equal(justOutside.requiresApproval, true, `a grant is stale at ${hours + 1}h`);
+  assert.deepEqual(justOutside.clearedByApproval, []);
+  assert.equal(justOutside.approvedBy, null, 'an expired signature must not appear on the record as a live one');
+});
+
+test('a malformed or non-granted approval record authorises nothing', () => {
+  /**
+   * Fails closed on every ambiguity, because the failure mode worth engineering against is not a
+   * crash — it is a plausible wrong answer. Each record below is one a real bug could produce: a
+   * request that was never answered, a denial, a grant whose timestamp was dropped by a partial
+   * write, a grant that forgot to record its ceiling, a grant that forgot which checks it answered.
+   */
+  const bad = {
+    'a request nobody has answered yet': { state: 'PENDING', clearedCheckIds: ['APR_LARGE_AMOUNT'] },
+    'an outright denial': { ...grant(), state: 'DENIED' },
+    'no state at all': { ...grant(), state: undefined },
+    'a grant with no timestamp': { ...grant(), grantedAt: null },
+    'a grant with an unparseable timestamp': { ...grant(), grantedAt: 'last tuesday' },
+    'a grant that forgot its ceiling': { ...grant(), approvedInvasiveness: undefined },
+    'a grant that forgot which checks it answered': { ...grant(), clearedCheckIds: undefined },
+    'a grant whose cleared ids are not a list': { ...grant(), clearedCheckIds: 'APR_LARGE_AMOUNT' },
+    'nothing at all': null,
+  };
+
+  for (const [description, approval] of Object.entries(bad)) {
+    const r = checkGuardrails({
+      action: retry(),
+      caseState: cs({ amountPaise: HUGE, approval }),
+      now: NOON_IST,
+      config: CONFIG,
+    });
+    assert.equal(r.requiresApproval, true, `${description} must not authorise a charge`);
+    assert.deepEqual(r.clearedByApproval, [], `${description} must not appear as a clearance`);
+  }
+});
+
+test('no approval check applies to a NONE-invasiveness action', () => {
+  /**
+   * A REACHABILITY PIN, written because a mutation test embarrassed me.
+   *
+   * `grantClears` defaults a missing envelope to `-1` rather than `0`, so a grant that forgot to
+   * record what it authorised authorises nothing. I tried to write a test that failed when that
+   * default was loosened to `0`, and none did — because `MONEY <= 0` and `CONTACT <= 0` are both
+   * false, the only actions the loosened default would wrongly clear are NONE-level ones, and no
+   * approval check currently applies to those. The branch is unreachable, so the honest thing is
+   * to pin the reason it is unreachable rather than to write a test that passes either way.
+   *
+   * Every concern below is triggered simultaneously — a ₹3,00,000 amount, an abstained TEXT-tier
+   * diagnosis, an unsupported belief — so a check that applied at all would fire here. If someone
+   * later adds an approval check that reaches a NONE-level action, this test fails and points at
+   * the `?? -1` in `grantClears`, which is exactly the note that would otherwise go unread.
+   */
+  const weak = {
+    rootCause: 'UNKNOWN',
+    matchTier: 'TEXT',
+    source: 'RULE',
+    requiresApprovalForMoneyMovement: true,
+    abstained: true,
+  };
+
+  const noneKinds = Object.values(ActionKind).filter(
+    (k) => invasivenessOf(k) === InvasivenessLevel.NONE
+  );
+  assert.ok(noneKinds.length >= 3, 'sanity: NO_ACTION_YET, ESCALATE_HUMAN and STOP_PERMANENT are NONE');
+
+  for (const kind of noneKinds) {
+    const r = checkGuardrails({
+      action: { kind },
+      caseState: cs({ amountPaise: HUGE }),
+      diagnosis: weak,
+      belief: { p: 0.1, support: { state: 'UNSEEN', rows: 0 } },
+      now: NOON_IST,
+      config: CONFIG,
+    });
+    assert.equal(
+      r.requiresApproval,
+      false,
+      `${kind} is NONE-invasiveness; an approval check reaching it makes grantClears' default load-bearing`
+    );
+  }
+});
+
+test('a grant clears only the concerns it was shown, so a new one re-gates the case', () => {
+  /**
+   * The narrowest and most easily-lost property. A reviewer looking at "₹3,00,000, above the
+   * threshold" has answered exactly that question. If the diagnosis later degrades — a re-observed
+   * case whose cause is now UNKNOWN — that is a fact the reviewer never saw, and the old signature
+   * must not cover it.
+   *
+   * The tempting shortcut here is "GRANTED means the case is unlocked". This test is what that
+   * shortcut breaks, and it is the reason the grant carries a list of check ids at all.
+   */
+  const weak = {
+    rootCause: 'UNKNOWN',
+    matchTier: 'TEXT',
+    source: 'RULE',
+    requiresApprovalForMoneyMovement: true,
+    abstained: true,
+  };
+
+  const r = checkGuardrails({
+    action: retry(),
+    caseState: cs({ amountPaise: HUGE, approval: grant() }),
+    diagnosis: weak,
+    now: NOON_IST,
+    config: CONFIG,
+  });
+
+  assert.equal(r.requiresApproval, true, 'a concern the reviewer never saw must go back to a human');
+  assert.deepEqual(r.clearedByApproval, ['APR_LARGE_AMOUNT'], 'while the concern they did see stays cleared');
+  assert.ok(
+    r.approvalReasons.every((s) => !s.startsWith('APR_LARGE_AMOUNT')),
+    'the answered question is not asked again'
+  );
+  assert.ok(r.approvalReasons.some((s) => s.startsWith('APR_WEAK_DIAGNOSIS')));
+
+  // And the inverse: a grant covering both concerns clears both.
+  const both = checkGuardrails({
+    action: retry(),
+    caseState: cs({
+      amountPaise: HUGE,
+      approval: grant({
+        clearedCheckIds: ['APR_LARGE_AMOUNT', 'APR_WEAK_DIAGNOSIS', 'APR_ABSTAINED_DIAGNOSIS'],
+      }),
+    }),
+    diagnosis: weak,
+    now: NOON_IST,
+    config: CONFIG,
+  });
+  assert.equal(both.requiresApproval, false);
+  assert.equal(both.clearedByApproval.length, 3);
+});
+
+test('a grant on a large case does not override an absolute prohibition', () => {
+  /**
+   * Approval and permission are different axes and must stay that way. A human can authorise an
+   * action that was merely gated; nobody can authorise one that is forbidden — a revoked mandate
+   * means the customer withdrew consent to be charged, and no amount of internal sign-off
+   * reinstates it. Collapsing these would turn the approval queue into a way to launder every
+   * guardrail in the table.
+   */
+  const r = checkGuardrails({
+    action: retry(),
+    caseState: cs({ amountPaise: HUGE, mandateRevoked: true, approval: grant() }),
+    now: NOON_IST,
+    config: CONFIG,
+  });
+
+  assert.equal(r.verdict, Verdict.FORBID, 'a signature does not reinstate a withdrawn mandate');
+  assert.ok(r.violations.some((v) => v.id === 'ABS_REVOKED_MANDATE'));
 });
 
 test('every approval check has an id and returns strings or null', () => {

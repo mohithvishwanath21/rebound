@@ -61,17 +61,7 @@
  *   --quiet            suppress progress lines
  */
 
-import { generateBatch } from '../../sim/generator.js';
-import { buildDataset } from '../dataset.js';
-import { splitByEvent } from '../modelComparison.js';
-import { observe } from '../../agent/observe.js';
-import { diagnose } from '../../agent/diagnose.js';
-import { fitLookupTable, fitPlatt } from '../../ml/calibration.js';
-import { fitLogistic } from '../../ml/logistic.js';
-import { createRecoveryScorer } from '../../agent/recoveryModel.js';
-import { runCycle } from '../../agent/orchestrator.js';
-import { createMemoryStore } from '../../db/store.js';
-import { createSimGateway } from '../../sim/simGateway.js';
+import { fitRecoveryScorer, buildWorld, runArm } from '../harness.js';
 import { GUARDRAILS, POLICY } from '../../core/config.js';
 import { readFlags, asNumber } from './flags.js';
 
@@ -81,7 +71,6 @@ import { readFlags, asNumber } from './flags.js';
  * irreproducible in a way invisible in its own output. 15:00 IST, deliberately away from a boundary.
  */
 const DEFAULT_NOW = '2026-08-24T09:30:00Z';
-const HOUR_MS = 3_600_000;
 
 const f = readFlags(
   process.argv.slice(2),
@@ -127,140 +116,59 @@ const started = Date.now();
 // STEP 1 — FIT THE RECOVERY MODEL ON TRAIN, ALWAYS
 // =============================================================================================
 /**
- * Identical to `decide-report`, deliberately, including the hyperparameters: the arm this command
- * executes must be the arm `npm run select-arm` selected and the arm `decide-report` prices, or the
- * three commands describe three different systems. Fitting on the split being run would make every
- * cell well-supported and the support asymmetry impossible to observe.
+ * Both of these now come from `src/eval/harness.js`, which Day 8 extracted so that the five-arm
+ * comparison in `npm run eval` runs the SAME loop this command runs. That is not tidying: a
+ * baseline measured by a different runner measures the runner. The extraction was verified by
+ * diffing this command's `--json` output before and after — identical apart from `elapsedMs`.
+ *
+ * The model is fitted on TRAIN even when `--split=TEST`, deliberately. Fitting on the split being
+ * run would make every lookup cell well-supported and the support asymmetry impossible to observe.
  */
 say('generating TRAIN and fitting the recovery model');
-const train = generateBatch({ seed: f.seed, split: 'TRAIN', now: startAt });
-const trainData = await buildDataset({ events: train.events, latents: train.latents, seed: f.seed });
-const { fit, valid: cal } = splitByEvent(trainData.rows, { fraction: 0.8, seed: f.seed });
-
-const lookup = fitLookupTable(fit, { key: (r) => `${r.diagnosedCause}|${r.actionKind}`, minCount: 10 });
-const logistic = fitLogistic(fit, { l2: 1e-4, iterations: 500, learningRate: 0.5 });
-const logPlatt = fitPlatt(cal.map((r) => r.y), cal.map((r) => logistic.predict(r.x)));
-
-/**
- * Probability from the logistic arm, SUPPORT from the lookup table. Two questions, two instruments:
- * a logistic model will extrapolate a confident number for a cell it has never seen, which is
- * exactly what the stopping rules exist to catch.
- */
-const scoreAction = createRecoveryScorer({
-  model: logistic,
-  calibrator: logPlatt,
-  supportFrom: lookup,
-  modelName: 'logistic+platt',
-});
-
-// =============================================================================================
-// STEP 2 — SEED THE RUN
-// =============================================================================================
-const target = f.split === 'TRAIN' ? train : generateBatch({ seed: f.seed, split: 'TEST', now: startAt });
-const events = target.events.slice(0, f.count);
-const eventIds = new Set(events.map((e) => e.eventId));
-
-/**
- * Latent truth is loaded ONLY to hand to the gateway, which is the world and is allowed to read it.
- * It is never joined onto the case records the agent sees. `test/boundary.test.js` enforces that
- * `src/agent/**` cannot import `src/sim/**` at all, and this file is under `src/eval/` precisely
- * because it must touch both sides — it is the harness, not the agent.
- */
-const latentById = new Map(target.latents.filter((l) => eventIds.has(l.eventId)).map((l) => [l.eventId, l]));
-const customerById = new Map(target.customers.map((c) => [c.customerId, c]));
-
-say(`observing and diagnosing ${events.length} cases`);
-const store = createMemoryStore();
-const runId = `run_${f.seed}_${f.split}`;
-await store.putRun({ runId, startedAt: startAt, arm: 'REBOUND_EV', seed: f.seed, split: f.split });
-
-const observedById = new Map();
-const diagnosisById = new Map();
-const caseRecords = [];
-for (const event of events) {
-  const observed = observe(event);
-  observedById.set(event.eventId, observed);
-  diagnosisById.set(event.eventId, await diagnose(observed));
-  caseRecords.push({
-    runId,
-    eventId: event.eventId,
-    customerId: event.customerId,
-    amountPaise: event.amountPaise,
-    state: 'OPEN',
-    retriesUsed: 0,
-    touchesUsed: 0,
-    openedAt: startAt,
-    /**
-     * Contact details and the event itself, because the gateway seam needs both:
-     * `validateActionRequest` refuses a CUSTOMER_CONTACTING action with no customer, in SIM
-     * exactly as in LIVE, and the SIM gateway prices outcomes against the loss's own physics
-     * (how old, which rail, what kind, how much). That symmetry is the point of validating in
-     * the shared module — a policy that works in simulation only because the simulator accepted
-     * a malformed request is a policy that fails in production.
-     *
-     * Both are OBSERVABLE records. The event is the payment failure as our own systems recorded
-     * it; the latent truth about why it failed and whether the customer will pay lives in
-     * `latentById` above and is handed only to the gateway. Putting the event on the case is a
-     * denormalisation, not a boundary violation.
-     */
-    customer: customerById.get(event.customerId) ?? null,
-    event,
-  });
-}
-await store.putCases(caseRecords);
-
-const totalExposurePaise = events.reduce((s, e) => s + e.amountPaise, 0);
-
-// =============================================================================================
-// STEP 3 — THE GATEWAY, AND A CLOCK BOTH SIDES AGREE ON
-// =============================================================================================
-/**
- * `clock` is mutable and read through a closure by BOTH the orchestrator (as `now`) and the gateway
- * (as its injected `now()`). They have to be the same instant. If the gateway kept its own wall
- * clock, a retry the policy priced for +72h would be resolved by the response model against the
- * moment the process happened to be running — so `fundsAvailableFrom` would be evaluated at the
- * wrong time and the whole landing-instant correction would be silently undone at the seam.
- */
-let clock = new Date(startAt);
-const gateway = createSimGateway({
-  getLatent: (eventId) => latentById.get(eventId),
+const { scoreAction, logistic, logPlatt, lookup, train } = await fitRecoveryScorer({
   seed: f.seed,
-  now: () => clock,
+  startAt,
 });
 
-const cycles = [];
-let recoveredPaise = 0;
-let attempts = 0;
+// =============================================================================================
+// STEP 2 — BUILD THE WORLD AND RUN THE LOOP
+// =============================================================================================
+/**
+ * `buildWorld` observes and diagnoses every case; `runArm` owns the store, the gateway, the shared
+ * mutable clock, and the cycle loop. The clock in particular is why this is one function and not
+ * three: the orchestrator and the gateway must read the same instant, or a retry priced to land at
+ * +72h gets resolved against whenever the process happened to be running, and Day 6's whole
+ * landing-instant correction is undone at the seam with no test failing.
+ */
+say(`observing and diagnosing ${f.count} cases`);
+const world = await buildWorld({
+  seed: f.seed,
+  split: f.split,
+  count: f.count,
+  startAt,
+  train,
+});
 
-for (let i = 0; i < f.cycles; i += 1) {
-  clock = new Date(startAt.getTime() + i * f.stepHours * HOUR_MS);
-  const active = await store.getActiveCases(runId);
-  if (active.length === 0) {
-    say(`all cases terminal after ${i} cycles; stopping early`);
-    break;
-  }
+const totalExposurePaise = world.totalExposurePaise;
 
-  const { summary } = await runCycle({
-    store,
-    gateway,
-    runId,
-    now: clock,
-    config,
-    scoreAction,
-    observeCase: (c) => observedById.get(c.eventId),
-    diagnoseCase: (obs) => diagnosisById.get(obs.eventId),
-    cycle: i,
-    policyArm: 'REBOUND_EV',
-  });
+const run = await runArm({
+  world,
+  arm: 'REBOUND_EV',
+  scoreAction,
+  cycles: f.cycles,
+  stepHours: f.stepHours,
+  config,
+  onCycle: (summary, at) =>
+    say(`cycle ${summary.cycle} at ${at.toISOString()}: ${summary.decided} decided, ` +
+      `${summary.attempts} executed, ${RUPEE(summary.recoveredPaise)} recovered`),
+});
 
-  recoveredPaise += summary.recoveredPaise;
-  attempts += summary.attempts;
-  cycles.push({ ...summary, activeAtStart: active.length });
-  say(`cycle ${i} at ${clock.toISOString()}: ${summary.decided} decided, ${summary.attempts} executed, ${RUPEE(summary.recoveredPaise)} recovered`);
-}
+const { store, runId, cycles, recoveredPaise, attempts } = run;
+if (run.stoppedEarlyAfter !== null) say(`all cases terminal after ${run.stoppedEarlyAfter} cycles; stopping early`);
+
 
 // =============================================================================================
-// STEP 4 — WHERE EVERY CASE ENDED UP
+// STEP 3 — WHERE EVERY CASE ENDED UP
 // =============================================================================================
 const finalCases = await store.getCases(runId);
 const stateMix = new Map();
@@ -486,7 +394,7 @@ if (asJson) {
   for (const pick of auditCounts.slice(0, f.trail)) {
     const entries = await store.getAudit(runId, { eventId: pick.eventId });
     const record = finalCases.find((c) => c.eventId === pick.eventId);
-    const diag = diagnosisById.get(pick.eventId);
+    const diag = world.diagnosisById.get(pick.eventId);
 
     L.push('  ' + '='.repeat(90));
     L.push(`  LIFECYCLE AUDIT TRAIL — case ${pick.eventId}`);

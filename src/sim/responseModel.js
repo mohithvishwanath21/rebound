@@ -521,6 +521,23 @@ export function recoveryProbability({ action, latent, event, now, touchesUsed = 
 }
 
 /**
+ * What a customer actually hands over when they pay.
+ *
+ * Extracted so the rule has exactly ONE home. A disputing customer who settles usually settles for
+ * less, and this used to be inlined in `simulateActionOutcome` alone — which was fine while an agent
+ * action was the only way money could arrive. Self-recovery is a second path to the same event, and a
+ * second copy of a haircut rule is a copy that eventually disagrees. Day 3 already cost a full log
+ * entry to "every partial settlement would have been booked at full value"; the way that recurs is by
+ * a new code path forgetting the cap, not by the original one breaking.
+ */
+export function settlementAmountPaise({ latent, event }) {
+  if (latent.payerType === PayerType.DISPUTING && latent.maxWillingToPayPaise) {
+    return Math.min(event.amountPaise, latent.maxWillingToPayPaise);
+  }
+  return event.amountPaise;
+}
+
+/**
  * Draw an actual outcome. Separated from probability computation so that tests can
  * assert on probabilities deterministically without dealing with sampling.
  */
@@ -530,13 +547,7 @@ export function simulateActionOutcome({ action, latent, event, now, touchesUsed,
   });
 
   const recovered = rng.next() < p;
-
-  // Partial settlement: a disputing customer who does pay often pays less. Modelled
-  // because reporting full recovery on a haircut would overstate results.
-  let amountPaise = event.amountPaise;
-  if (recovered && latent.payerType === PayerType.DISPUTING && latent.maxWillingToPayPaise) {
-    amountPaise = Math.min(amountPaise, latent.maxWillingToPayPaise);
-  }
+  const amountPaise = settlementAmountPaise({ latent, event });
 
   return { recovered, amountPaise: recovered ? amountPaise : 0, p, breakdown };
 }
@@ -544,10 +555,20 @@ export function simulateActionOutcome({ action, latent, event, now, touchesUsed,
 /**
  * Would this case have recovered on its own by `now`, with no intervention?
  *
- * Called by every policy arm including do-nothing, so that self-recovery is credited
- * identically everywhere. Without this, an active policy would silently absorb credit
- * for customers who were always going to pay — the most common way a recovery agent
- * overstates its own contribution.
+ * Called for every policy arm including do-nothing, so that self-recovery is credited identically
+ * everywhere. Without this, an active policy would silently absorb credit for customers who were
+ * always going to pay — the most common way a recovery agent overstates its own contribution.
+ *
+ * Two things this function relies on and does not itself enforce, both of which cost real debugging:
+ *
+ *  - `selfRecoverAt` must be AFTER the instant the case entered our queue. The generator conditions
+ *    on that now (see its survivorship note); before it did, 75% of self-recoverers had already
+ *    "paid" before any run began, and this function would have fired for all of them at cycle 0.
+ *  - The CALLER must apply it to cases the policy has given up on, not merely to active ones. A
+ *    STOPPED or ESCALATED case is still unpaid, and a customer who pays anyway pays regardless of
+ *    whether we are still chasing. Filtering on active cases would give B0_DO_NOTHING — which stops
+ *    everything immediately — a self-recovery total of exactly zero, inverting the one measurement
+ *    B0 exists to provide.
  */
 export function checkSelfRecovery({ latent, now }) {
   if (!latent.willSelfRecover || !latent.selfRecoverAt) return false;

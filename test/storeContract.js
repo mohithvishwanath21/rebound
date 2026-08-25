@@ -122,6 +122,51 @@ export function runStoreContract(label, makeStore) {
     assert.equal((await s.getCases('r2')).length, 1, 'runs are isolated from each other');
   });
 
+  T('a case awaiting a human is active but not due, and appears in the approval queue', async () => {
+    /**
+     * ACTIVE and DUE answer different questions, and conflating them breaks something in each
+     * direction. Treat AWAITING_APPROVAL as terminal and the run declares itself finished while a
+     * human still owes it an answer, and the money silently stops being chased. Treat it as due and
+     * the case is re-decided every cycle, which can only re-raise the identical request — measured
+     * on the day-7 batch as 21 pending cases producing 171 requests across 8 cycles.
+     *
+     * In the contract rather than in the memory-store tests because the Mongo store is what the
+     * dashboard's approval queue will read. A queue that means something different in production
+     * than in evaluation is exactly the portability defect this file exists to prevent.
+     */
+    const s = await makeStore();
+    const t0 = new Date('2026-08-22T10:00:00Z');
+    const t1 = new Date('2026-08-22T11:00:00Z');
+    const far = new Date('2026-09-30T10:00:00Z');
+
+    await s.putCases([
+      { runId: 'r1', eventId: 'open', state: 'OPEN' },
+      // Requested later, so a queue sorted oldest-first must put it second.
+      { runId: 'r1', eventId: 'newer', state: 'AWAITING_APPROVAL', approval: { state: 'PENDING', requestedAt: t1 } },
+      { runId: 'r1', eventId: 'older', state: 'AWAITING_APPROVAL', approval: { state: 'PENDING', requestedAt: t0 } },
+      // Answered, so out of the queue and back in the agent's hands.
+      { runId: 'r1', eventId: 'granted', state: 'OPEN', approval: { state: 'GRANTED', requestedAt: t0 } },
+      // A stale record: state moved on, the approval sub-document did not. Must not appear.
+      { runId: 'r1', eventId: 'stale', state: 'RECOVERED', approval: { state: 'PENDING', requestedAt: t0 } },
+      { runId: 'r2', eventId: 'other', state: 'AWAITING_APPROVAL', approval: { state: 'PENDING', requestedAt: t0 } },
+    ]);
+
+    const active = (await s.getActiveCases('r1')).map((c) => c.eventId).sort();
+    assert.deepEqual(active, ['granted', 'newer', 'older', 'open'], 'awaiting a human is unresolved, so active');
+
+    const due = (await s.getDueCases('r1', far)).map((c) => c.eventId).sort();
+    assert.deepEqual(due, ['granted', 'open'], 'but not ours to move until it is answered');
+
+    const queue = await s.getPendingApprovals('r1');
+    assert.deepEqual(
+      queue.map((c) => c.eventId),
+      ['older', 'newer'],
+      'oldest first, so a reviewer working top-down clears the longest wait rather than the newest'
+    );
+    assert.equal((await s.getPendingApprovals('r2')).length, 1, 'runs are isolated');
+    assert.deepEqual(await s.getPendingApprovals('nope'), [], 'an unknown run is empty, not an error');
+  });
+
   T('idempotency key rejects a replayed action', async () => {
     const s = await makeStore();
     const action = {

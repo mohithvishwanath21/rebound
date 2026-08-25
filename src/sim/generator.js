@@ -38,8 +38,20 @@ import { makeRng, deriveSeed } from '../core/rng.js';
 import { rupeesToPaise } from '../core/money.js';
 import { LossType, Rail, Segment } from '../core/enums.js';
 import { PayerType } from './payerTypes.js';
+import { ASSUMPTIONS } from './responseModel.js';
 
-export const GENERATOR_VERSION = '1.0.0';
+/**
+ * Bumped to 1.1.0 when self-recovery gained its survivorship conditioning, and to 1.2.0 when each
+ * event got its own RNG stream. `batchIdFor` folds this into every batch id precisely so that a change
+ * to the world cannot be mistaken for a change in results: any number computed against a `g100` batch
+ * is not comparable to one computed against `g110` or `g120`, and the id says so out loud.
+ *
+ * 1.2.0 changes every event in every batch, because it changes the order numbers are drawn in. It
+ * buys the property the Day 8 sensitivity sweep is built on — perturbing one world parameter perturbs
+ * one thing — and it invalidates every figure measured against g110. Anything quoted from a g110 run
+ * has to be re-measured rather than carried forward.
+ */
+export const GENERATOR_VERSION = '1.2.0';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
@@ -74,6 +86,36 @@ export const DEFAULT_PARAMS = {
 
   /** Window over which failures occurred, relative to "now". */
   historyDays: 21,
+
+  /**
+   * Unconditional propensity to pay without any intervention, by loss type.
+   *
+   * READ FROM `ASSUMPTIONS.selfRecoveryRate` RATHER THAN RESTATED HERE, and that is the whole point.
+   * These three numbers used to be a hardcoded copy sitting a few hundred lines below, identical to
+   * the assumption character for character. The assumption's own `basis` field says it is
+   * "load-bearing for the B0 baseline: set it high and every policy looks less impressive" — and
+   * `perturbAssumptions` duly perturbs it, so the sensitivity sweep would have swept the one
+   * assumption most able to embarrass this project and moved nothing whatsoever. A knob wired to
+   * nothing that still prints a sensitivity result is worse than a missing knob.
+   *
+   * `overrides` on `generateBatch` is how the sweep supplies a perturbed set, which is why this is a
+   * param and not a module constant.
+   */
+  selfRecoveryRate: {
+    FAILED_PAYMENT: ASSUMPTIONS.selfRecoveryRate.FAILED_PAYMENT.value,
+    FAILED_SUBSCRIPTION: ASSUMPTIONS.selfRecoveryRate.FAILED_SUBSCRIPTION.value,
+    OVERDUE_INVOICE: ASSUMPTIONS.selfRecoveryRate.OVERDUE_INVOICE.value,
+  },
+
+  /**
+   * How long after the failure an unprompted payment can arrive, in days.
+   *
+   * A generator-level modelling choice rather than a response-model assumption: it describes when
+   * self-recovery happens, while `selfRecoveryRate` describes how often. Note it is much shorter than
+   * `historyDays` (12 vs 21), and that gap is load-bearing — it is what makes a sufficiently old
+   * unpaid case *provably* not a self-recoverer. See the survivorship conditioning below.
+   */
+  selfRecoveryWindowDays: [0.5, 12],
 
   /** Share of events the merchant's gateway had already auto-retried once. */
   priorAttemptRate: 0.22,
@@ -365,12 +407,45 @@ function buildFailurePayload({ trueCause, rail, rng, vagueRate }) {
  * separate collections, which is what keeps the truth out of the agent's reach.
  */
 export function generateEvents({ seed, params, now, customers }) {
-  const rng = makeRng(deriveSeed(seed, 'events'));
   const events = [];
   const latents = [];
 
   for (let i = 0; i < params.events; i++) {
     const eventId = `evt_${pad(i + 1)}`;
+
+    /**
+     * ONE RNG STREAM PER EVENT, and this is load-bearing for the entire sensitivity analysis.
+     *
+     * This used to be a single stream created once outside the loop, and all 600 events drew from it
+     * in sequence. That is the natural way to write a generator and it silently coupled every case to
+     * every case before it: the loop body is full of conditional draws (`if (trueRootCause ===
+     * 'ISSUER_DOWNTIME')`, `if (payerType === DISPUTING)`, and the self-recovery delay below), so how
+     * many numbers case i consumed depended on how case i turned out — and therefore on the
+     * parameters. Change one probability and every subsequent case gets different numbers for
+     * everything.
+     *
+     * Measured cost before the fix, on the day7 world: sweeping nothing but `selfRecoveryRate` moved
+     * total portfolio exposure by 12.6% (₹9,30,035 at 0x to ₹8,12,762 at 2x). Self-recovery is a
+     * latent and cannot move a rupee of recorded exposure, so those figures were impossible; a
+     * sensitivity sweep built on them would have attributed a repriced portfolio to the assumption
+     * under test. `test/generator.test.js` now pins the invariance.
+     *
+     * `deriveSeed`'s own docblock prescribes exactly this ("adding one extra random call would shift
+     * every downstream number and silently invalidate a comparison") and the generator already
+     * applied the reasoning one line wide, drawing `rng.bool(qGivenOpen)` unconditionally to protect
+     * the stream. Per-event streams make it structural instead of a rule someone has to remember: a
+     * conditional draw added anywhere in this loop tomorrow cannot reach another case.
+     *
+     * Keyed on `eventId` rather than on `i`, and being precise about this because I tried to write a
+     * test that distinguishes them and could not: `eventId` is derived from `i`, so today the two are
+     * the same function of position and NO test can tell them apart. It is a naming choice, not a
+     * behavioural one. It is kept because the identity is the meaningful key the moment event
+     * generation stops being a simple indexed loop — a filter, a shuffle, or per-customer generation
+     * would all break the index and leave the id correct. Stated as defence in depth rather than
+     * dressed up as a tested property.
+     */
+    const rng = makeRng(deriveSeed(seed, `event:${eventId}`));
+
     const customer = rng.pick(customers);
 
     // B2B customers skew toward invoices; consumers toward payments and subscriptions.
@@ -387,14 +462,21 @@ export function generateEvents({ seed, params, now, customers }) {
     const causeDist = CAUSE_GIVEN_PAYER[payerType][lossType];
     const trueRootCause = rng.weighted(causeDist);
 
-    const rail = lossType === LossType.OVERDUE_INVOICE
-      ? Rail.NETBANKING
-      : rng.weighted({
-          [customer.preferredRail]: 0.7,
-          [Rail.UPI]: 0.12,
-          [Rail.CARD]: 0.12,
-          [Rail.NETBANKING]: 0.06,
-        });
+    /**
+     * Drawn unconditionally and then possibly discarded, for the same reason the self-recovery coin
+     * below is: an invoice is always collected on netbanking, so a naive ternary skips the draw for
+     * invoices and shifts everything after it — including `amountPaise` — as a function of the loss
+     * type. With per-event streams that can no longer leak into another case, but it would still
+     * couple a `lossTypeMix` sweep to the amounts WITHIN each case, which is the same confound at
+     * smaller scale. The rule this file follows: a case consumes a fixed number of draws.
+     */
+    const chosenRail = rng.weighted({
+      [customer.preferredRail]: 0.7,
+      [Rail.UPI]: 0.12,
+      [Rail.CARD]: 0.12,
+      [Rail.NETBANKING]: 0.06,
+    });
+    const rail = lossType === LossType.OVERDUE_INVOICE ? Rail.NETBANKING : chosenRail;
 
     const ageDays = rng.float(0.2, params.historyDays);
     const occurredAt = new Date(now.getTime() - ageDays * DAY_MS);
@@ -514,15 +596,44 @@ export function generateEvents({ seed, params, now, customers }) {
       latent.maxWillingToPayPaise = Math.round(amountPaise * rng.float(0.4, 0.85));
     }
 
-    // ---- self-recovery ----
-    // Modulated by payer type, because "would have paid anyway" is not uniform. This
-    // is what the B0 baseline exists to measure, and crediting it to an active policy
-    // is the most common way a recovery agent flatters itself.
-    const baseSelf = {
-      FAILED_PAYMENT: 0.18,
-      FAILED_SUBSCRIPTION: 0.12,
-      OVERDUE_INVOICE: 0.25,
-    }[lossType];
+    // ---- self-recovery, conditioned on the case still being open ----
+    /**
+     * "Would have paid anyway", modulated by payer type. This is what the B0 baseline exists to
+     * measure, and crediting it to an active policy is the most common way a recovery agent flatters
+     * itself.
+     *
+     * THE SURVIVORSHIP CORRECTION, which is the subtle part and was a real bug for six days.
+     *
+     * The naive draw is `selfRecoverAt = occurredAt + U(0.5, 12) days`. But `occurredAt` is up to
+     * `historyDays` = 21 days in the past, while the window closes at 12 — so a case that failed 20
+     * days ago got a self-recovery instant up to 19.5 days BEFORE `now`. In English the world was
+     * asserting: this customer paid you seventeen days ago, and the invoice is still sitting in your
+     * open-recovery queue. Both cannot be true. Measured consequence: 66 of 88 self-recoverers (75%)
+     * had already "paid" before the run began, and ₹1,07,871 — 9.6% of portfolio exposure, 25x what
+     * the agent recovers — evaporated at cycle 0 into every arm's total equally.
+     *
+     * The input to this system is the set of losses STILL UNPAID at `now`. That is a
+     * survivorship-conditioned sample, and conditioning on it removes precisely the fast
+     * self-recoverers — the same length bias that makes the average wait for a bus exceed half the
+     * average headway. So the latent must be drawn from the conditional distribution:
+     *
+     *   pOutlasts  = P(delay > ageDays)                     -- 0 once the whole window has elapsed
+     *   qGivenOpen = q*pOutlasts / (q*pOutlasts + (1 - q))   -- Bayes: P(self-recoverer | still open)
+     *   delay      ~ U(max(lo, ageDays), hi)                -- truncated, so selfRecoverAt > now always
+     *
+     * Note this is NOT merely rescheduling the same cases into the future. It correctly makes an old
+     * unpaid case LESS LIKELY to be a self-recoverer at all, because its continued presence in the
+     * queue is evidence against it. Past `hi` days the posterior is exactly zero: the entire window
+     * elapsed and they did not pay, so they are provably not someone who pays unprompted. That is
+     * 43.3% of the batch, and it is why `selfRecoveryWindowDays` being shorter than `historyDays`
+     * carries real information rather than being an arbitrary pair of constants.
+     *
+     * This change makes B0 weaker and therefore makes our own policy's incremental figure look
+     * better, which is exactly the kind of self-serving correction that deserves suspicion. It was
+     * pre-registered in ENGINEERING_LOG.md before the arm comparison was run, the predicted magnitude
+     * (0.29-0.33x) was committed to in advance, and Day 8 reports B0 under both conventions.
+     */
+    const baseSelf = params.selfRecoveryRate[lossType];
 
     const selfMultiplier = {
       [PayerType.WILL_PAY_IF_REMINDED]: 1.5,
@@ -532,9 +643,27 @@ export function generateEvents({ seed, params, now, customers }) {
       [PayerType.NEVER_PAYING]: 0.0,
     }[payerType];
 
-    if (rng.bool(Math.min(0.95, baseSelf * selfMultiplier))) {
+    const [selfLo, selfHi] = params.selfRecoveryWindowDays;
+    const q = Math.min(0.95, baseSelf * selfMultiplier);
+
+    const earliestDelay = Math.max(selfLo, ageDays);
+    const pOutlasts = earliestDelay >= selfHi ? 0 : (selfHi - earliestDelay) / (selfHi - selfLo);
+    const qGivenOpen = q >= 1 ? 1 : (q * pOutlasts) / (q * pOutlasts + (1 - q));
+
+    /**
+     * BOTH draws are unconditional, so a case consumes the same count whatever it turns out to be.
+     *
+     * The coin was already drawn unconditionally, with a docblock explaining why. The delay was not —
+     * it sat inside the `if`, which is the defect described at the top of this loop. Nothing currently
+     * follows it in the loop body, so hoisting it changes no number on its own; it is here so that the
+     * next person to add a draw below this line does not reintroduce a portfolio-repricing bug by
+     * writing perfectly reasonable code.
+     */
+    const selfRecovers = rng.bool(qGivenOpen);
+    const selfDelayDays = rng.float(earliestDelay, selfHi);
+    if (selfRecovers) {
       latent.willSelfRecover = true;
-      latent.selfRecoverAt = new Date(occurredAt.getTime() + rng.float(0.5, 12) * DAY_MS);
+      latent.selfRecoverAt = new Date(occurredAt.getTime() + selfDelayDays * DAY_MS);
     }
 
     events.push(event);

@@ -417,6 +417,65 @@ export const RULES = Object.freeze([
 ]);
 
 /**
+ * How much damage an action can do if it turns out to be wrong. Used to bound what a human's
+ * signature authorises.
+ *
+ * A ladder rather than a boolean because the whole point of an approval envelope is that consent
+ * to a small thing is not consent to a large one. A reviewer shown "send this customer a payment
+ * link" and clicking approve has not authorised a ₹2,99,915 charge against the same case, and an
+ * implementation that treated the grant as a per-case boolean would let exactly that happen — with
+ * a clean audit trail saying a human approved it.
+ */
+export const InvasivenessLevel = Object.freeze({ NONE: 0, CONTACT: 1, MONEY: 2 });
+
+export function invasivenessOf(actionOrKind) {
+  const kind = typeof actionOrKind === 'string' ? actionOrKind : actionOrKind?.kind;
+  if (MONEY_MOVING.has(kind)) return InvasivenessLevel.MONEY;
+  if (CUSTOMER_CONTACTING.has(kind)) return InvasivenessLevel.CONTACT;
+  return InvasivenessLevel.NONE;
+}
+
+/**
+ * The approval on this case, if it is a grant that is still worth anything.
+ *
+ * Fails CLOSED on every ambiguity. A grant with no `grantedAt` cannot be aged, so it is treated as
+ * no grant at all rather than as a young one — the alternative is that a malformed or hand-edited
+ * record becomes permanent authority, which is the more expensive way to be wrong.
+ */
+function liveGrant(approval, now, config) {
+  if (approval?.state !== 'GRANTED') return null;
+  const grantedAt = approval.grantedAt ? new Date(approval.grantedAt).getTime() : NaN;
+  if (!Number.isFinite(grantedAt)) return null;
+  const validMs = (config.GUARDRAILS.approvalValidForHours ?? 0) * 3_600_000;
+  if (new Date(now).getTime() > grantedAt + validMs) return null;
+  return approval;
+}
+
+/**
+ * Does this grant clear this particular approval check for this particular action?
+ *
+ * Both halves matter. The grant must name the check — a human who was shown "the amount is above
+ * the threshold" and approved has cleared that concern and nothing else, so a *different* concern
+ * arising later (the diagnosis degraded, the belief lost its support) re-gates the case rather than
+ * riding through on consent given for another reason. And the action must sit inside the
+ * invasiveness envelope the grant was given for.
+ *
+ * `?? -1` on the envelope, not `?? 0`: a grant record missing the field authorises nothing at all,
+ * rather than silently authorising the bottom rung. Being precise about this one, because I tried
+ * to write a test for it and could not: today the difference is UNREACHABLE, because no approval
+ * check applies to a NONE-invasiveness action (NO_ACTION_YET, ESCALATE_HUMAN, STOP_PERMANENT), so
+ * `?? 0` would behave identically. It is defence in depth against a future rung rather than a
+ * live defect being held shut, and `test/guardrails.test.js` pins the reachability argument
+ * instead of pretending to pin the branch.
+ */
+function grantClears({ grant, checkId, s }) {
+  if (!grant) return false;
+  if (!Array.isArray(grant.clearedCheckIds)) return false;
+  if (!grant.clearedCheckIds.includes(checkId)) return false;
+  return invasivenessOf(s.kind) <= (grant.approvedInvasiveness ?? -1);
+}
+
+/**
  * Reasons an otherwise-permitted action still needs a human before it executes.
  *
  * Each returns null or a string. Kept separate from RULES because these do not change whether
@@ -552,11 +611,27 @@ export function checkGuardrails({
     deferUntil = new Date(Math.max(...datedDefers.map((v) => new Date(v.until).getTime())));
   }
 
+  /**
+   * A live grant SUPPRESSES the checks it was given for, rather than bypassing this block. The
+   * distinction shows up in the audit trail: `clearedByApproval` records which concerns a human
+   * signed off and who signed, so "this charge went out above the threshold" is answerable with a
+   * name and an instant instead of being invisible because the check never ran.
+   */
+  const grant = liveGrant(caseState.approval, ctx.now, config);
   const approvalReasons = [];
+  const approvalCheckIds = [];
+  const clearedByApproval = [];
+
   for (const check of APPROVAL_CHECKS) {
     if (!check.applies(s, ctx)) continue;
     const reason = check.reason(s, ctx);
-    if (reason) approvalReasons.push(`${check.id}: ${reason}`);
+    if (!reason) continue;
+    if (grantClears({ grant, checkId: check.id, s })) {
+      clearedByApproval.push(check.id);
+      continue;
+    }
+    approvalReasons.push(`${check.id}: ${reason}`);
+    approvalCheckIds.push(check.id);
   }
 
   return {
@@ -568,6 +643,15 @@ export function checkGuardrails({
     evaluated,
     requiresApproval: approvalReasons.length > 0,
     approvalReasons,
+    /**
+     * The same reasons as ids, unjoined. Exists so that a grant can be recorded against the exact
+     * checks it answers without anyone parsing `"APR_LARGE_AMOUNT: amount 29991500 paise is..."`
+     * back apart. A string split on ':' would work today and break the first time a reason text
+     * contains a colon.
+     */
+    approvalCheckIds,
+    clearedByApproval,
+    approvedBy: grant?.by ?? null,
   };
 }
 
@@ -610,5 +694,35 @@ export function normaliseCaseState({ observed, record = {}, now = new Date() } =
     mandateRevoked: observed?.subscription?.mandateStatus === 'revoked',
 
     downtimeWindow: record.downtimeWindow ?? observed?.downtime?.observedWindow ?? null,
+
+    /**
+     * THE DEFERRAL LEDGER (#67) — how many times this case has already postponed each class of
+     * action, which class it postponed last, and the instant it chose to wake at.
+     *
+     * Surfaced here, in the same shape as every other budget counter, because a deferral limit is
+     * exactly a budget: `retriesUsed` bounds how often we may charge, `touchesUsed` bounds how
+     * often we may write, and `deferralCounts` bounds how often we may promise to decide later.
+     * That the third budget did not exist is why the agent could postpone 4,235 times against 332
+     * attempts and never breach a single rule.
+     *
+     * `deferralWakeAt` is what distinguishes "waiting, legitimately, for an instant still in the
+     * future" from "standing on the instant it chose and choosing to wait again". Only the second
+     * is the loop, and a rule that could not tell them apart would delete scheduled retries
+     * outright — which would look like a fix and would destroy the timing edge Days 5-7 exist to
+     * exploit. Defaults follow the STRICT-for-counters convention above: a missing ledger is an
+     * empty ledger, never an exhausted one.
+     */
+    deferralCounts: record.deferral?.counts ?? {},
+    deferredClass: record.deferral?.lastClass ?? null,
+    deferralWakeAt: record.deferral?.wakeAt ?? null,
+
+    /**
+     * The approval record, read from OUR case file rather than from the observation — a human's
+     * signature is our own fact about our own process, and nothing the payment provider tells us
+     * can grant or revoke it. Passed through unvalidated on purpose: `liveGrant` is the single
+     * place that decides whether an approval record means anything, so there is one gate to audit
+     * instead of a permissiveness decision duplicated here.
+     */
+    approval: record.approval ?? null,
   };
 }

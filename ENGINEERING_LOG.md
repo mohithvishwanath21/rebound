@@ -2188,6 +2188,97 @@ prohibition — and choosing by taste is how a policy accumulates knobs that wer
 read nicely. The sensitivity sweep is where that choice gets made, with `failedRetryPenaltyPaise` swept
 widest because it is the one I have the least evidence for.
 
+---
+
+## [Day 8] 9.6% of the portfolio was paid before the agent woke up, and fixing it flatters me
+
+**This entry is a PRE-REGISTRATION. It is written before I have run the arm comparison, and it says
+what I expect the change to do and which direction that benefits me. If you are reading the Day 8
+results, read this first and then check whether the entry that follows kept its word.**
+
+**Symptom:** before wiring `checkSelfRecovery` into the run loop I probed whether self-recovery even
+fires inside the 3.5-day run window. It does — and mostly before the agent gets a turn:
+
+```
+cases with willSelfRecover                        14 / 80   (17.5%)
+of those, selfRecoverAt ALREADY PAST at run start  10 / 14
+selfRecoverAt minus run start, days:
+  min -17.46   p25 -6.84   median -3.01   p75 1.35   max 6.70
+self-recovering exposure at cycle 0            ₹1,07,871
+self-recovering exposure by cycle 7            ₹1,21,056
+total portfolio exposure                       ₹11,20,352
+agent recovery, same world (Day 7 figure)          ₹4,311
+```
+
+₹1,07,871 resolves itself at cycle 0, before any policy acts. That is 9.6% of the whole portfolio and
+**25 times** what the agent recovers. Had I wired self-recovery in without looking, `B0_DO_NOTHING`
+would have posted a six-figure recovery, every active arm would have inherited the same six figures for
+free, and the incremental column — the entire point of the exercise — would have been ₹4,311 of signal
+sitting on top of ₹1,07,871 of noise common to all five arms.
+
+**Root cause:** two lines of the generator, each reasonable, jointly incoherent.
+
+```js
+const occurredAt   = new Date(now.getTime() - ageDays * DAY_MS);          // generator.js:400, ageDays ~ U(0.2, 21)
+latent.selfRecoverAt = new Date(occurredAt.getTime() + rng.float(0.5, 12) * DAY_MS);   // generator.js:537
+```
+
+`ageDays` runs to 21 days; the self-recovery delay tops out at 12. So a case that failed 20 days ago
+gets a `selfRecoverAt` up to 19.5 days in the past. Stated in English, the world is asserting: *this
+customer paid you seventeen days ago, and the invoice is still sitting in your open-recovery queue.*
+Those two facts cannot both be true. A case that self-recovered would have closed.
+
+The bug is not the 12-day window and it is not the 21-day history. It is that **the queue is a
+survivorship-conditioned sample and the generator draws as if it were not.** Our input is the set of
+losses *still unpaid at `now`*, and conditioning on that removes precisely the fast self-recoverers.
+This is length bias, the same effect that makes the average bus wait longer than half the average
+headway.
+
+**Fix (pre-registered, and the arithmetic committed to before measuring):** draw the latent from the
+conditional distribution the queue actually implies. With `q` the unconditional propensity and
+`d ~ U(0.5, 12)` the delay, a case is observed only if it did *not* already self-recover, so
+
+```
+pOutlasts = P(d > ageDays)  = clamp01((12 - max(0.5, ageDays)) / 11.5)
+qGivenOpen = q*pOutlasts / (q*pOutlasts + (1 - q))            <- Bayes
+d          ~ U(max(0.5, ageDays), 12)                         <- truncated, so selfRecoverAt > now always
+```
+
+Note this is *not* merely rescheduling the same 14 cases into the future. It correctly makes an old
+case **less likely to be a self-recoverer at all**, because its continued existence in the queue is
+evidence against it. For `ageDays >= 12` the posterior is exactly zero: the whole window elapsed and
+they did not pay. That is 43.3% of the batch.
+
+Predicted effect, computed analytically before running anything (`/tmp/survival.mjs`, reproduced in
+`test/generator.test.js`): the posterior lands at **0.29–0.33x** the unconditional rate across every
+loss-type/payer-type cell, so **14 self-recoverers becomes about 4.3**, all of them firing inside the
+window rather than before it.
+
+**The part I have to say out loud: this change moves in my own favour, and I noticed that before I
+made it.** It cuts B0's recovery by roughly two thirds. B0 is the baseline my policy is measured
+against, so weakening it inflates my headline incremental figure — and I am the one who decided the
+generator was wrong. That is exactly the shape of [the Day 5 addendum
+mistake](#day-5-addendum--i-picked-the-model-by-reading-the-held-out-test-set): the hypothesis that
+happens to restore the flattering conclusion is the one that gets the least scrutiny.
+
+Three constraints I am binding myself to, before any number exists:
+
+1. The justification is **world semantics, not results.** It stands or falls on whether a paid invoice
+   can sit in an open queue. It cannot, so the fix is right even if it hurt me.
+2. Day 8 reports B0 under **both conventions** — `STALE` (current: self-recovery may precede run
+   start) and `SURVIVED` (conditioned). A reader gets to see exactly what the choice bought me.
+3. The prediction above is on the record. If the measured drop is not near 0.29–0.33x, my model of the
+   world is wrong somewhere else and the discrepancy is the finding.
+
+**A second defect found in the same block, unrelated but worse:** `baseSelf` in the generator is
+`{0.18, 0.12, 0.25}` — character-for-character `ASSUMPTIONS.selfRecoveryRate`, and a *copy*. Nothing
+connects them. That assumption's own `basis` field reads "Load-bearing for the B0 baseline: set it high
+and every policy looks less impressive," and `perturbAssumptions` dutifully perturbs it. So the Day 8
+sensitivity sweep would have swept the single assumption most able to embarrass this project, printed a
+result for it, and moved nothing at all. Logged as #59, fixed alongside this, with a test that doubling
+the rate must produce strictly more self-recoverers — and with the wiring verified as a byte-identical
+no-op first, so the refactor and the sensitivity result cannot be confounded.
+
 **Lesson:** three, and the middle one is the one I did not expect to find.
 
 **A stopping rule whose floor equals its own penalty is not a stopping rule.** ₹2 to act and ₹2 to fail
@@ -2206,4 +2297,255 @@ turned a vague observation into a specific defect.
 would quote.** I found this by printing one case's full lifecycle into the report and reading it as a
 story, which is the same technique that found the two defects above. Aggregates hide the embarrassing
 case; that is what aggregates are for.
+
+
+---
+
+## [Day 8] The agent was a perfect procrastinator, and it audited beautifully while doing nothing
+
+**This entry is a PRE-REGISTRATION. It is written before the fix exists and before any post-fix number
+has been printed. It says what I expect, how much, what would falsify it, and — the part that matters —
+which direction the error runs. If you are reading the Day 8 results, read this first and then check
+whether the entry that follows kept its word.**
+
+### The symptom, and why every report I had built was blind to it
+
+The approval-gate delta came out *bit-identical* at 8 cycles and at 20 cycles: pooled ₹1,89,319 both
+times, in all five worlds, while grants nearly tripled. I first read horizon-invariance as good news —
+evidence the approver's value was real and not a function of how long I let the clock run. Then I asked
+why more clock bought literally nothing, and instrumented attempts instead of money:
+
+```
+seed w01, 16 cycles x 12h, 80 TRAIN cases, g120
+
+  cyc 10-15:  DUE 51   DECIDED 51   ACT ~51   WAKEUPS ~51   ATTEMPTS 0   recovered Rs 0
+
+  CASE_SCHEDULED events: 796   ATTEMPT_STARTED events: 78
+  ratio: 10.2 schedulings per attempt
+  most-rescheduled case: 16 times   median: 15
+  59 of 80 cases still SCHEDULED at the end
+
+  evt_000003  Rs 16,721.00  attempts=0
+    03-02T09:00  SCHEDULED -> wake 03-02T15:00 (+6.0h)  ev=Rs 6,385.63  RETRY_SCHEDULED:...
+    03-02T21:00  SCHEDULED -> wake 03-03T03:00 (+6.0h)  ev=Rs 5,907.94  wakeAt slid +12.0h
+    ...  fourteen more, +6.0h every single time  ...
+    03-09T21:00  SCHEDULED -> wake 03-10T03:00 (+6.0h)  ev=Rs 2,997.65  wakeAt slid +12.0h
+    --> 16 schedulings, 0 attempts
+    --> distinct intents across those schedulings: 1 (THE SAME ONE, re-armed)
+```
+
+**Mechanism.** `POLICY.candidateRetryOffsetsHours` starts at 6, and the recovery model says P(recover)
+rises with retry delay at that granularity. So EV(retry in 6h) > EV(retry now) — at *every* instant.
+The case wakes at its own scheduled time, `runCycle` re-decides from scratch (deliberately: the #37
+landing-instant principle, so a three-day-old belief never authorises a charge), the same inequality
+holds because nothing about it depended on the clock, and it arms another +6h wakeup. **A
+time-invariant preference for waiting never resolves.** The action is permanently imminent and never
+happens. Note the EV decaying ₹6,385 → ₹2,997 down that trace: the agent could see itself getting
+poorer by waiting and still chose to wait, because it was comparing "now" against "six hours from now"
+and never against "ever".
+
+**Why it hid for two days, which is the part worth keeping.** Offsets start at 6h and the cycle step is
+12h, so a case deferred +6h *is* legitimately due next cycle. Nothing looks wrong from outside: queue
+depth is healthy, the audit trail shows diligent 12-hourly re-decisioning with full EV decomposition on
+every row, guardrail violations are zero, the action mix is sensible, and the recovery figure is merely
+*small*. **It reads as a cautious policy rather than a broken one** — and "cautious" is exactly the
+adjective I wanted to be able to claim, so I had no instinct to look harder.
+
+**What actually exposed it: money per cycle cannot distinguish "we tried and failed" from "we never
+tried."** Every report in this repo printed money. Counting `ATTEMPT_STARTED` per cycle took four lines
+and broke the case open immediately. Every money figure from here on gets an attempt count beside it.
+
+**And the humbling detail.** `applyNonActingOutcome` already contains this comment, written by me on
+Day 7, about the `Outcome.WAIT` branch: *"So the case would be re-decided immediately, decide to wait
+again, and spin. Falling back to the next cycle boundary makes the degenerate case merely slow instead
+of infinite."* I identified this exact failure mode, guarded the branch I was looking at, and never
+asked whether the neighbouring branch — `scheduleAction`, the RETRY_SCHEDULED path — had the same hole.
+It did. **Reasoning about a failure mode in one branch does not immunise the file.**
+
+### The fix I am committing to before I measure it
+
+**A deferral is a commitment, not a preference.** When a case is woken at an instant it chose for
+itself, the candidate set excludes deferring the same class of action any further: it must act, escalate,
+or stop. Re-decision is preserved in full — the belief, the guardrails and the approval envelope are all
+re-evaluated at the landing instant, exactly as #37 requires — but the agent is not permitted to spend
+its own wakeup re-arming that wakeup. Plus `POLICY.maxDeferralsPerCase` as a hard backstop with its own
+named audit event, so the invariant holds even if some path I have not thought of reaches the same loop
+from another direction.
+
+Two designs I considered and rejected. A **discount rate on delayed EV** is the textbook answer and
+would fall out of the arithmetic cleanly, but it requires a discount rate I cannot justify from anything
+in this project — I would be picking a number by feel to fix a bug, and this log already has one entry
+about two constants I picked by feel cancelling each other out. **True optimal stopping** is correct and
+is a week of work I do not have.
+
+### Predictions, on the record, before the fix exists
+
+Sharp (mechanism — these should be near-deterministic, and I expect to be held to them):
+
+1. `(CASE_SCHEDULED + CASE_WAITING) : ATTEMPT_STARTED` falls from **10.2 to below 3.0** in all five
+   worlds. Both event types counted, deliberately: fixing the retry path and displacing the loop into
+   the WAIT path would be the obvious way to satisfy a narrower metric while changing nothing.
+2. Cases still `SCHEDULED` at the horizon falls from **59/80 to under 25/80**.
+3. No case defers the same action class more than `maxDeferralsPerCase` times, and every case that
+   defers at all either attempts or reaches a terminal state inside the horizon.
+
+Directional (money — softer, and I am committing to a band so I cannot claim a hit either way):
+
+4. Attempts roughly **double to triple** (78 → 150–250 on w01/16 cycles).
+5. Recovered money **rises**, and I predict the day7 g120 figure moves from **₹12,300 to somewhere
+   between ₹60,000 and ₹2,50,000** — a 5x to 20x band. Wide because I genuinely do not know; stated
+   anyway, because a prediction I cannot miss is not a prediction.
+
+### Falsifiers, and both of them are informative
+
+- **If the ratio drops below 3 and money does NOT materially rise**, the deferral loop was not what was
+  suppressing recovery, and ₹12,300 is close to this policy's real ceiling on this world. That is a far
+  worse finding for Rebound than the bug is, and it would need to be reported as the headline.
+- **If money goes DOWN**, then the deferrals were partly earning their keep — the timing edge that Days
+  5–7 are built on is real and I have just blunted it by forcing act-or-stop at an arbitrary instant. In
+  that case the correct fix is the *budget* alone (`maxDeferralsPerCase`, letting the agent defer a few
+  times and then commit) rather than the hard commitment rule, and I will say so rather than keeping the
+  version that produced the bigger number.
+
+### The direction of the error, stated plainly because it flatters me
+
+**Every recovery figure this project has produced came from an agent that mostly never acts.** The
+₹12,300 on the g120 day7 world, the ₹1,89,319 pooled approval delta, the "approval value is
+horizon-invariant at 1.00x" finding — all of them artifacts of a stationary loop, and all of them
+*understating* Rebound. Fixing this makes my numbers go up. That is precisely why the prediction above
+is written down before the fix runs: a large improvement I predicted in advance is evidence, and the
+same improvement announced afterwards is a number I went looking for.
+
+**And the caveat that survives the fix.** This bug suppresses *every* arm, not just mine. `B1_NAIVE_RETRY`
+never defers at all, so it was never in the loop — which means the pre-fix comparison would have made a
+naive baseline look competitive with an EV policy for reasons having nothing to do with either policy.
+The post-fix number is not a win on its own. **The comparison that matters (#57) is arm against arm
+after the fix, in the same worlds, paired** — never before against after.
+
+### Reproduce
+
+```
+node --test test/*.test.js                       # test/deferral.test.js — 4 tests fail before the fix, 7 after
+PROBE_SEED=w01 PROBE_CYCLES=16 node probe-spin.mjs   # ratio, before and after
+npm run orchestrate-report                       # the day7 g120 headline, with attempt counts
+```
+
+---
+
+## [Day 8] The commitment rule, graded: three predictions hit, one missed, and the miss was my instrument
+
+The fix is in and measured. Grading against the block above, in the order it was written, before any
+commentary — and one of the four sharp predictions **failed**.
+
+| # | prediction | result | |
+|---|---|---|---|
+| 1 | postpone:attempt ratio **< 3.0** in every world | 0.90, 0.99, 0.91, 0.97, 0.97 — worst **0.99** | **PASS** |
+| 2 | cases still `SCHEDULED` **< 25/80** in every world | 34, 35, 38, 36, 36 — worst **38/80** | **FAIL** |
+| 3a | same-class deferrals ≤ `maxDeferralsPerCase` | exactly **3** in all five, cap 3 | **PASS** |
+| 3b | every postponing case attempts or terminates in-horizon | **0** never resolved (was 39–53) | **PASS** |
+
+Paired, same seeds, same 16×12h horizon, grant-everything approver so the gate could not confound it:
+
+| seed | postpone:attempt | cases stuck | never resolved | money recovered |
+|---|---|---|---|---|
+| day7 | 10.26 → **0.90** | 59 → 34 | 39 → 0 | ₹14,760 → **₹2,33,442** |
+| w01 | 10.63 → **0.99** | 59 → 35 | 39 → 0 | ₹1,57,444 → **₹4,95,716** |
+| w02 | 11.73 → **0.91** | 60 → 38 | 46 → 0 | ₹41,196 → **₹3,34,478** |
+| w03 | 17.58 → **0.97** | 64 → 36 | 53 → 0 | ₹1,511 → **₹4,97,536** |
+| w04 | 15.74 → **0.97** | 65 → 36 | 52 → 0 | ₹5,880 → **₹5,48,007** |
+| **pooled** | **12.76 → 0.95** | | **230 → 0** | **₹2,20,791 → ₹21,09,179** |
+
+Directional predictions 4 and 5: attempts per world 236–272 against a predicted band of 150–250, so
+**four of five inside the band and one above it**. Money pooled **9.55x** against a predicted 5x–20x
+band, and up in **5 of 5** worlds.
+
+**How the money figure must be quoted, because the obvious way is misleading.** Per-world ratios are
+3.15x, 8.12x, 15.82x, 93.2x, 329.3x — and the two enormous ones are enormous because the pre-fix
+denominators were ₹5,880 and ₹1,511. A 329x is not a finding, it is a division by something close to
+zero. The defensible statement is the paired delta: **every world gained between ₹2.19L and ₹5.42L,
+pooled +₹18.88L.** Quoting "up to 329x" would be true, arithmetically correct, and dishonest.
+
+### Prediction 2 failed, and the reason is that I measured the wrong thing
+
+34–38 of 80 cases still end `SCHEDULED`. I predicted under 25. The tempting move here is to note that
+59–65 → 34–38 is a big improvement and treat the threshold as roughly met. That is exactly the move the
+pre-registration exists to prevent, so: **prediction 2 is a miss.**
+
+Then I measured *why*, with `probe-stuck.mjs`, rather than reasoning about it. Decomposing the stuck
+cases across three worlds:
+
+| | day7 | w01 | w02 |
+|---|---|---|---|
+| end `SCHEDULED` | 34 | 35 | 38 |
+| holding a pending retry deferral | **0** | **0** | **0** |
+| waiting on a guardrail (the `WAIT` path) | **34** | **35** | **38** |
+| of those, never attempted anything | **0** | **0** | **0** |
+
+Every single one is a quiet-hours `WAIT`, on a case that had already attempted at least once. Not one
+holds a deferral.
+
+**`CaseState.SCHEDULED` is written by two paths and I only reasoned about one.** `scheduleAction` writes
+it for a chosen `RETRY_SCHEDULED` — the deferral this fix is about. `applyNonActingOutcome` writes the
+same state for `Outcome.WAIT`, a guardrail deferral that resolves on its own when the clock moves. My
+threshold could not tell them apart, so it was never a measurement of the spin loop.
+
+It is worse than merely ambiguous. The run's last cycle is `startAt + 15×12h` = **21:00 UTC = 02:30
+IST**, inside quiet hours. Ending a run in the middle of the night *guarantees* a large residue of
+cases correctly waiting until 09:00. I was measuring the calendar.
+
+The quantity I actually meant is prediction 3b — postponed, never attempted, never terminated — and it
+went **39–53 → 0 in all five worlds**. That is the claim, it passed, and it is the one to quote.
+
+**The lesson, and it is a variant of one already in this log.** A threshold is only as good as the
+uniqueness of the state it names. `SCHEDULED` looked like a specific fact and was a union of two
+mechanisms. Before pre-registering a threshold on a state, check how many code paths can write it — the
+same shape as the earlier finding that money-per-cycle cannot distinguish "tried and failed" from "never
+tried", which is why every money figure in this log now carries an attempt count. I did not carry it
+across to state counts.
+
+**Consequence for #62.** The horizon must end on a cycle that is not inside quiet hours, or the metric
+must be attempt-based rather than state-based. An odd number of 12h steps from a 09:00 UTC start always
+lands at 21:00 UTC, so this affects every figure I have quoted for cases-in-flight.
+
+### What mutation testing found, including two things nothing was guarding
+
+Five mutations. Three bit immediately; **two did not**, and both mattered.
+
+- `nowMs >= wakeMs` → `>`: 2 fail. The on-the-dot wakeup is the common case, not an edge case.
+- BUDGET branch disabled: 1 fail.
+- withholding ignores the action class (the over-broad fix): 2 fail — the scoping test earns its keep.
+- **the consumed wakeup is never cleared: 0 fail.** All 461 tests green against a build where a case
+  that deferred once could never schedule again for the rest of its life. `maxDeferralsPerCase: 3`
+  would have been a number no case could reach, I would have shipped "one deferral per case, ever"
+  while reporting a cap of three, and #58 would have swept a knob that does nothing. The postpone:attempt
+  ratio would have looked *better*. **A bug that improves the headline metric will not be found by
+  reading the headline metric** — the second time this project has met that shape.
+- **the cap raised to 999: 0 fail.** Correct of the budget test, which reads the cap from `POLICY` so it
+  survives #58's sweep. But it left nothing asserting the cap is *reachable*, and a backstop set beyond
+  any realistic horizon is decoration.
+
+Both gaps are now closed by tests 6 and 7, which assert properties rather than values: no cycle may end
+holding a wakeup in its own past, the class must be deferrable more than once, and `COMMITMENT` must
+fire before `BUDGET` inside a ten-cycle run. Suite: **463 tests, 463 pass.**
+
+### What the fix does not settle
+
+- **The comparison still has not happened.** Every number above is before-vs-after on one arm, which is
+  the comparison the pre-registration explicitly warned against treating as a result: *"The comparison
+  that matters (#57) is arm against arm after the fix, in the same worlds, paired — never before against
+  after."* That still stands, and one clause of the pre-registration needs correcting: I wrote that "this
+  bug suppresses every arm, not just mine." It does not. Only the EV arm chooses `RETRY_SCHEDULED` from
+  the offset list; `B1_NAIVE_RETRY` and `B2_AGGRESSIVE` retry immediately and never defer, so they were
+  never in the loop and never suppressed. The suppression was **asymmetric and against my own arm**,
+  which makes the pre-fix ₹12,300 headline an understatement of Rebound specifically — and makes it even
+  less legitimate to read any advantage out of the before/after table. #57 is the only thing that can
+  say whether the EV policy beats a naive one.
+- **The commitment rule is cruder than a discount rate**, and I still think a discount rate is the
+  better long-run answer. It stays out because choosing its value by feel and then reporting the money
+  that value produced is not a measurement. The hard limit is auditable: a reviewer can count deferrals
+  in the trail and check the rule held.
+- **#52 needs re-reading.** Some of what I filed as "the agent retries hopeless instruments because the
+  EV bar is only ₹2" may have been the loop, not the bar. Attempts went 332 → 1,241; whether the new
+  ones are worth making is a different question from whether they happen.
+
 

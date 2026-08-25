@@ -84,12 +84,18 @@
  * It does not decide anything. Every choice comes back from `decideForCase`. If a policy question
  * seems to want answering here, it belongs in `decide.js`, `guardrails.js` or `stopping.js` — the
  * value of a pure decision engine collapses the moment execution starts making its own choices.
+ *
+ * That separation is also why `runCycle` takes a `decide` function rather than importing one. Day 8
+ * needs to run a naive-retry baseline through this exact loop — same guardrails, same store, same
+ * gateway seed — because a baseline that runs through a different loop measures the loop, not the
+ * policy. `decideForCase` remains the default, so nothing that does not ask for a baseline can get
+ * one by accident.
  */
 
 import { GUARDRAILS, POLICY } from '../core/config.js';
 import { ActionKind, MONEY_MOVING, CUSTOMER_CONTACTING } from '../core/actions.js';
 import { decideForCase, Outcome } from './decide.js';
-import { CUSTOMER_MESSAGE_WINDOW_DAYS } from './guardrails.js';
+import { CUSTOMER_MESSAGE_WINDOW_DAYS, invasivenessOf } from './guardrails.js';
 import { gatewayMethodFor, ReceiptState } from '../razorpay/gateway.js';
 
 const DAY_MS = 86_400_000;
@@ -117,6 +123,20 @@ export const CaseState = Object.freeze({
   SCHEDULED: 'SCHEDULED',
   AWAITING_APPROVAL: 'AWAITING_APPROVAL',
   RECOVERED: 'RECOVERED',
+  /**
+   * The customer paid with no intervention from us.
+   *
+   * A SEPARATE terminal state rather than `RECOVERED` with a flag, and the separation is the whole
+   * value of it. Every metric in the project that totals the agent's contribution filters on
+   * `RECOVERED`; had self-recovery reused that state with a `recoveredBy: 'SELF'` discriminator, each
+   * of those totals would have silently absorbed money the agent never earned, and the resulting
+   * figure would look like a better result rather than a bug. Two states means the default behaviour
+   * of any careless sum is to EXCLUDE self-recovery, which is the safe direction to be careless in.
+   *
+   * Note `recoveredPaise` is deliberately NOT set on these cases — `selfRecoveredPaise` is. Same
+   * reasoning: the field a metric reaches for by habit must not contain the money it should not count.
+   */
+  RECOVERED_SELF: 'RECOVERED_SELF',
   STOPPED: 'STOPPED',
   ESCALATED: 'ESCALATED',
   EXPIRED: 'EXPIRED',
@@ -135,9 +155,40 @@ export const AuditType = Object.freeze({
   ATTEMPT_DUPLICATE: 'ATTEMPT_DUPLICATE',
   CONTACT_RECORDED: 'CONTACT_RECORDED',
   MONEY_RECOVERED: 'MONEY_RECOVERED',
+  /**
+   * The world resolved a case for free. Emitted by the harness, not by `runCycle` — the agent has no
+   * way to know this happened and must not be told, or it could learn to wait on cases that pay
+   * themselves. It is in this enum because the audit trail is a single vocabulary and a reader of the
+   * trail needs to see why a case closed without an attempt against it.
+   */
+  SELF_RECOVERED: 'SELF_RECOVERED',
   CASE_SCHEDULED: 'CASE_SCHEDULED',
   CASE_WAITING: 'CASE_WAITING',
+  /**
+   * The policy WANTED to postpone and was not allowed to (#67). Its own type rather than a field on
+   * CASE_SCHEDULED, because it is the opposite event: nothing was scheduled.
+   *
+   * This exists because a refusal that shows up only as an absence is unreviewable. Before the fix,
+   * one case scheduled itself sixteen times in sixteen cycles and every line looked like a first,
+   * reasonable decision — the timestamp differed each time. After it, cycle N schedules and cycle
+   * N+1 acts, and without this event those two cycles read as two unrelated decisions with nothing
+   * on the page explaining why the same case with the same numbers chose differently.
+   *
+   * It is also the metric. Counting DEFERRAL_REFUSED is how the eval reports how often the
+   * commitment rule actually bound, which is the difference between "the fix works" and "the fix
+   * never fired and something else changed the numbers".
+   */
+  DEFERRAL_REFUSED: 'DEFERRAL_REFUSED',
   APPROVAL_REQUESTED: 'APPROVAL_REQUESTED',
+  /**
+   * A human resolved a pending request. Two types rather than one with an `outcome` field, for the
+   * same reason `RECOVERED_SELF` is its own state: the dashboard's approval queue and every
+   * compliance question ("show me everything that was authorised above the threshold") filter on
+   * type, and a filter that has to remember to also read a discriminator is a filter that will
+   * eventually forget.
+   */
+  APPROVAL_GRANTED: 'APPROVAL_GRANTED',
+  APPROVAL_DENIED: 'APPROVAL_DENIED',
   CASE_ESCALATED: 'CASE_ESCALATED',
   CASE_STOPPED: 'CASE_STOPPED',
   CASE_EXPIRED: 'CASE_EXPIRED',
@@ -557,13 +608,31 @@ async function applyNonActingOutcome({ store, runId, decision, at }) {
   }
 
   if (decision.outcome === Outcome.AWAIT_APPROVAL) {
+    /**
+     * Two fields here exist solely so that `resolveApproval` never has to guess what the reviewer
+     * was looking at.
+     *
+     * `checkIds` is the machine-readable form of `reasons`, so a grant can clear exactly the
+     * concerns that were on screen and no others. `proposedInvasiveness` is the rung of the
+     * invasiveness ladder the proposed action sits on, captured HERE rather than derived later from
+     * the signature string — a grant recorded days after the request must not depend on parsing
+     * `rebound:evt_123:RETRY_SCHEDULED@2026-03-04T…` back into an action kind.
+     *
+     * Both are snapshots of the request, deliberately. If the world moves and the agent would now
+     * want a more invasive action, the envelope no longer covers it and the case comes back for a
+     * fresh signature. That is the intended behaviour, not a limitation.
+     */
     await store.patchCase(runId, eventId, {
       state: CaseState.AWAITING_APPROVAL,
       nextActionAt: null,
       'approval.state': 'PENDING',
       'approval.requestedAt': at,
       'approval.reasons': decision.approvalReasons ?? [],
+      'approval.checkIds': decision.approvalCheckIds ?? [],
       'approval.proposedAction': decision.chosen?.signature ?? null,
+      'approval.proposedInvasiveness': decision.chosen?.action
+        ? invasivenessOf(decision.chosen.action)
+        : null,
       'approval.evPaise': decision.chosen?.evPaise ?? null,
     });
     await store.appendAudit({
@@ -617,6 +686,151 @@ async function applyNonActingOutcome({ store, runId, decision, at }) {
 }
 
 /**
+ * A human resolves a pending approval request.
+ *
+ * =================================================================================================
+ * WHAT A GRANT AUTHORISES, AND WHY IT IS NOT "THIS ACTION" AND NOT "THIS CASE"
+ * =================================================================================================
+ * There were three candidate designs and the two obvious ones are both wrong.
+ *
+ * "The grant authorises the SPECIFIC proposed action." Tempting, because it sounds maximally
+ * conservative. It is actually unsafe: the signature was minted hours or days ago, and
+ * `scheduleAction`'s docblock already explains at length why a stored intent must never be executed
+ * later — between request and grant the customer may have paid, disputed, revoked the mandate, or
+ * used up their contact budget on a different invoice. Executing the approved signature would act
+ * on a stale belief and a stale guardrail check, with a human's name attached to it.
+ *
+ * "The grant unlocks the CASE." Simple, and it silently converts consent-to-message into
+ * consent-to-charge. A reviewer who approved a payment link would find a ₹2,99,915 retry executed
+ * under their signature, and the audit trail would say a human approved it. That is worse than
+ * having no approval mechanism, because it manufactures false accountability.
+ *
+ * So a grant is an ENVELOPE: it clears the specific concerns the reviewer was shown
+ * (`approval.checkIds`), on this case, for actions no more invasive than the one proposed
+ * (`approval.proposedInvasiveness`), for `GUARDRAILS.approvalValidForHours`. The agent then
+ * RE-DECIDES at the current instant. If its new best action fits inside the envelope it executes;
+ * if a new concern has appeared, or it now wants something more invasive, the case returns to the
+ * queue for a fresh signature. `grantClears` in guardrails.js is the single enforcement point.
+ *
+ * A DENIAL is terminal. A reviewer saying no to chasing an invoice is saying do not chase it, and
+ * leaving the case OPEN would have the agent propose a slightly cheaper action next cycle and
+ * re-ask — which is how an automated system nags a human into approving something. The narrower
+ * design (deny only this action, allow others) is deliberately NOT built: it is more expressive and
+ * it hands the agent a way to grind down a refusal.
+ *
+ * @param grant  true to authorise, false to refuse
+ * @param by     who decided. Required — an approval with no accountable name is not an approval,
+ *               and the whole value of this record is that it answers "who said yes".
+ */
+export async function resolveApproval({ store, runId, eventId, grant, by, at = new Date(), note = null }) {
+  if (!by) {
+    throw new TypeError(
+      'resolveApproval({ by }) is required: an approval that cannot name who granted it provides ' +
+        'no accountability, which is the only thing an approval record is for.'
+    );
+  }
+
+  const c = await store.getCase(runId, eventId);
+  if (!c) throw new Error(`resolveApproval: unknown case ${runId}/${eventId}`);
+
+  /**
+   * Refuse to resolve anything that is not actually pending, rather than resolving it anyway.
+   *
+   * This is the idempotency guard for the approval path. A double-click in the dashboard, a retried
+   * HTTP request, or an approver acting on a case that self-recovered in the meantime all land here.
+   * Granting a case that has already been recovered, denied, or paid would move it back out of a
+   * terminal state and hand the policy a case the world has finished with.
+   */
+  if (c.state !== CaseState.AWAITING_APPROVAL || c.approval?.state !== 'PENDING') {
+    return {
+      applied: false,
+      because:
+        `case is ${c.state} with approval ${c.approval?.state ?? 'absent'}; ` +
+        'only a PENDING request on an AWAITING_APPROVAL case can be resolved',
+    };
+  }
+
+  const decidedAt = new Date(at);
+
+  if (!grant) {
+    await store.patchCase(runId, eventId, {
+      state: CaseState.STOPPED,
+      nextActionAt: null,
+      'approval.state': 'DENIED',
+      'approval.by': by,
+      'approval.decidedAt': decidedAt,
+      'approval.note': note,
+      'stop.at': decidedAt,
+      'stop.code': 'APPROVAL_DENIED',
+      'stop.reason': `${by} declined to authorise recovery on this case`,
+    });
+    await store.appendAudit({
+      runId, eventId, type: AuditType.APPROVAL_DENIED, at: decidedAt,
+      detail: {
+        by,
+        note,
+        proposed: c.approval?.proposedAction ?? null,
+        amountPaise: c.amountPaise ?? null,
+        waitedHours: hoursBetween(c.approval?.requestedAt, decidedAt),
+        because: 'a human declined; the case is closed rather than re-proposed more cheaply',
+      },
+    });
+    return { applied: true, state: 'DENIED' };
+  }
+
+  await store.patchCase(runId, eventId, {
+    /**
+     * Back to OPEN with a null `nextActionAt`, which makes the case DUE on the next cycle. Not
+     * straight to an execution: the re-decide is the point. See the envelope discussion above.
+     */
+    state: CaseState.OPEN,
+    nextActionAt: null,
+    'approval.state': 'GRANTED',
+    'approval.by': by,
+    'approval.decidedAt': decidedAt,
+    'approval.note': note,
+    /**
+     * `grantedAt` duplicates `decidedAt` today and is read by `liveGrant` for expiry. Kept as its
+     * own field because the two answer different questions — when the clock on this authority
+     * started, versus when the human happened to click — and a later change to record, say, a
+     * post-dated authorisation must not silently move the expiry basis.
+     */
+    'approval.grantedAt': decidedAt,
+    'approval.clearedCheckIds': c.approval?.checkIds ?? [],
+    'approval.approvedInvasiveness': c.approval?.proposedInvasiveness ?? null,
+  });
+
+  await store.appendAudit({
+    runId, eventId, type: AuditType.APPROVAL_GRANTED, at: decidedAt,
+    detail: {
+      by,
+      note,
+      proposed: c.approval?.proposedAction ?? null,
+      amountPaise: c.amountPaise ?? null,
+      clearedCheckIds: c.approval?.checkIds ?? [],
+      approvedInvasiveness: c.approval?.proposedInvasiveness ?? null,
+      validUntil: iso(
+        new Date(decidedAt.getTime() + (GUARDRAILS.approvalValidForHours ?? 0) * 3_600_000)
+      ),
+      waitedHours: hoursBetween(c.approval?.requestedAt, decidedAt),
+      because:
+        'authorises actions no more invasive than the one proposed, on this case, until the ' +
+        'grant expires; the agent re-decides rather than executing the stale proposal',
+    },
+  });
+
+  return { applied: true, state: 'GRANTED' };
+}
+
+/** Null-safe elapsed hours, for the audit detail that shows how long a human took. */
+function hoursBetween(from, to) {
+  if (!from) return null;
+  const a = new Date(from).getTime();
+  if (!Number.isFinite(a)) return null;
+  return Number(((new Date(to).getTime() - a) / 3_600_000).toFixed(2));
+}
+
+/**
  * A scheduled action is a wakeup, not an execution.
  *
  * `POLICY.candidateRetryOffsetsHours` starts at 6, so a chosen RETRY_SCHEDULED always lands in
@@ -631,9 +845,32 @@ async function applyNonActingOutcome({ store, runId, decision, at }) {
  * correct at the moment it takes effect — which is the same landing-instant principle the pricing
  * fix in `recoveryModel.js` was about, applied to authorisation instead of probability.
  */
-async function scheduleAction({ store, runId, decision, at }) {
+async function scheduleAction({ store, runId, decision, at, config = { GUARDRAILS, POLICY } }) {
   const eventId = decision.eventId;
   const when = new Date(decision.chosen.action.scheduledFor);
+  const cls = decision.chosen.action.kind;
+
+  /**
+   * THE DEFERRAL LEDGER (#67). Three fields, and each one is load-bearing.
+   *
+   * `deferral.wakeAt` is what lets the next decision know it is standing on an instant IT chose,
+   * rather than merely being decided at some moment that happens to be later. Without it the fix
+   * cannot distinguish a case legitimately waiting for a future salary date from a case re-arming
+   * the same six-hour wait for the sixteenth time, and a rule that cannot tell those apart deletes
+   * scheduled retries outright.
+   *
+   * `deferral.lastClass` scopes the refusal, so waking from a retry deferral does not silence the
+   * contacting actions.
+   *
+   * `deferral.counts.<CLASS>` is the budget. Read-then-write because `applyPatch` sets values and
+   * has no increment operator, which is safe here: the orchestrator processes one case at a time
+   * within a cycle, and two cycles cannot overlap on the same case because the second reads the
+   * `nextActionAt` the first wrote. Worth stating explicitly because read-then-write on a shared
+   * store is exactly the shape that stops being safe the moment anything runs concurrently, and the
+   * Mongo-backed store (#8) would need `$inc` here rather than this.
+   */
+  const priorCounts = decision.caseState?.deferralCounts ?? {};
+  const priorForClass = priorCounts[cls] ?? 0;
 
   await store.patchCase(runId, eventId, {
     state: CaseState.SCHEDULED,
@@ -641,6 +878,9 @@ async function scheduleAction({ store, runId, decision, at }) {
     'scheduled.intent': decision.chosen.signature,
     'scheduled.evPaise': decision.chosen.evPaise,
     'scheduled.decidedAt': at,
+    'deferral.lastClass': cls,
+    'deferral.wakeAt': when,
+    [`deferral.counts.${cls}`]: priorForClass + 1,
   });
 
   await store.appendAudit({
@@ -649,6 +889,13 @@ async function scheduleAction({ store, runId, decision, at }) {
       intent: decision.chosen.signature,
       wakeAt: iso(when),
       evPaise: decision.chosen.evPaise,
+      /**
+       * The count is printed BESIDE the intent, so a reader scanning the trail sees "deferral 3 of 3"
+       * rather than sixteen structurally identical lines that each look like a first decision. The
+       * loop hid for two days because every line was unique — the timestamp differed every time.
+       */
+      deferralOfClass: priorForClass + 1,
+      deferralCap: config?.POLICY?.maxDeferralsPerCase ?? null,
       note: 'the case will be re-decided at wakeup, not executed from this stored intent',
     },
   });
@@ -668,9 +915,13 @@ const isFutureScheduled = (decision, now) =>
  * @param gateway      injected, so `src/agent` never imports `src/sim`
  * @param runId
  * @param now          the clock. Never `Date.now()` — see the header.
- * @param scoreAction  the probability model, passed through to `decideForCase`
+ * @param scoreAction  the probability model, passed through to `decide`
  * @param observeCase  case record -> the observation the agent is allowed to see
  * @param diagnoseCase (observed) -> diagnosis
+ * @param decide       the policy. Defaults to `decideForCase`; a baseline arm supplies its own.
+ *                     Used in BOTH passes — see the note at the commit-pass call site for why
+ *                     using it in only one would silently score a baseline's proposal with our
+ *                     policy's commit.
  * @param cycle        cycle index, for the audit trail
  */
 export async function runCycle({
@@ -682,12 +933,14 @@ export async function runCycle({
   scoreAction,
   observeCase,
   diagnoseCase,
+  decide = decideForCase,
   cycle = 0,
   policyArm,
 }) {
   if (typeof scoreAction !== 'function') throw new TypeError('runCycle({ scoreAction }) is required');
   if (typeof observeCase !== 'function') throw new TypeError('runCycle({ observeCase }) is required');
   if (typeof diagnoseCase !== 'function') throw new TypeError('runCycle({ diagnoseCase }) is required');
+  if (typeof decide !== 'function') throw new TypeError('runCycle({ decide }) must be a function');
 
   const at = new Date(now);
   const due = await store.getDueCases(runId, at);
@@ -721,7 +974,7 @@ export async function runCycle({
     const caseRecord = await hydrateCase({ store, caseRecord: raw, now: at, config });
     const observed = await observeCase(caseRecord);
     const diagnosis = await diagnoseCase(observed, caseRecord);
-    const decision = decideForCase({
+    const decision = decide({
       observed, diagnosis, record: caseRecord, scoreAction,
       runState: proposalRunState, now: at, config, policyArm,
     });
@@ -771,8 +1024,14 @@ export async function runCycle({
      * authoritative, because it is the only one that sees the budget as it will actually be at
      * the moment of the side effect. The proposal's job was to earn this case its place in the
      * queue; it does not get to authorise anything.
+     *
+     * `decide` and not `decideForCase`, and this is the call that matters. The propose pass only
+     * produces an ordering; THIS is the one whose output gets executed. An injection point wired
+     * into propose alone would let a baseline choose the queue order and then hand every actual
+     * action back to the EV policy — a comparison in which both arms do the same thing and one of
+     * them gets the credit.
      */
-    const decision = decideForCase({
+    const decision = decide({
       observed, diagnosis, record: caseRecord, scoreAction,
       runState, now: at, config, policyArm,
     });
@@ -830,11 +1089,64 @@ export async function runCycle({
       });
     }
 
+    /**
+     * A postponement the policy wanted and was refused is recorded BEFORE the outcome is applied,
+     * because it is a fact about how this decision was reached rather than about what it did. It is
+     * emitted on the committed decision only — the pre-pass proposal is discarded, and auditing a
+     * refusal that a superseded proposal encountered would double-count the mechanism.
+     */
+    if (decision.deferralLimit) {
+      await store.appendAudit({
+        runId, eventId: decision.eventId, type: AuditType.DEFERRAL_REFUSED, at,
+        detail: {
+          cycle,
+          boundBy: decision.deferralLimit.boundBy,
+          actionClass: decision.deferralLimit.class,
+          deferralsSoFar: decision.deferralLimit.count,
+          cap: decision.deferralLimit.cap,
+          withheldCandidates: decision.deferralLimit.withheldCandidates,
+          because: decision.deferralLimit.because,
+          /** What it did instead, so the refusal and its consequence are one line in the trail. */
+          insteadChose: decision.chosen?.signature ?? null,
+          insteadOutcome: decision.outcome,
+        },
+      });
+    }
+
     // A scheduled retry is a wakeup, not an execution.
     if (isFutureScheduled(decision, at)) {
-      await scheduleAction({ store, runId, decision, at });
+      await scheduleAction({ store, runId, decision, at, config });
       executed.push({ decision, divergedFromProposal: diverged, scheduled: true, result: null });
       continue;
+    }
+
+    /**
+     * A WAKEUP IS SPENT ONCE IT IS STOOD ON, and forgetting to say so is a bug I nearly shipped.
+     *
+     * The commitment rule fires when `deferral.wakeAt` is in the past. If the field survived the
+     * cycle that consumed it, it would stay in the past forever and `deferral.lastClass` would stay
+     * set — so a case that deferred once, woke, and retried immediately could never schedule again
+     * for the rest of its life. `maxDeferralsPerCase: 3` would be a number in a config file that no
+     * case could ever reach, and the eval would report a cap that was never the binding constraint.
+     * The commitment rule would have quietly become "one deferral per case, ever", which is a
+     * different and much blunter policy than the one I am about to measure and defend.
+     *
+     * Cleared here rather than inside the decision engine because the engine is pure — and cleared
+     * only on the paths that did NOT schedule something new, since `scheduleAction` above overwrites
+     * both fields with the fresh wakeup and clearing after it would erase the commitment before it
+     * could ever bind.
+     *
+     * `deferral.counts` deliberately SURVIVES. The budget is per case for its whole life; resetting
+     * it on every action would let a case alternate retry, defer, retry, defer indefinitely and
+     * never breach a cap — the same loop with one extra step, which is exactly the kind of fix that
+     * passes its own test.
+     */
+    const spentWakeAt = decision.caseState?.deferralWakeAt;
+    if (spentWakeAt && new Date(spentWakeAt).getTime() <= new Date(at).getTime()) {
+      await store.patchCase(runId, decision.eventId, {
+        'deferral.lastClass': null,
+        'deferral.wakeAt': null,
+      });
     }
 
     const result = await executeDecision({

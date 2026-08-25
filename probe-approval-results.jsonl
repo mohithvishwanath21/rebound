@@ -1,0 +1,10 @@
+{"cycles":8,"seed":"day7","exposure":76943900,"frozenBefore":30779700,"frozenAfter":0,"before":1476000,"after":1476000,"grants":9,"underGrant":52,"selfMatch":true,"sched":62,"rec":6,"esc":8,"stopped":3,"selfRec":1}
+{"cycles":8,"seed":"w01","exposure":82976800,"frozenBefore":58677500,"frozenAfter":0,"before":270400,"after":15744400,"grants":17,"underGrant":102,"selfMatch":true,"sched":64,"rec":5,"esc":7,"stopped":2,"selfRec":2}
+{"cycles":8,"seed":"w02","exposure":120140600,"frozenBefore":103286100,"frozenAfter":0,"before":661700,"after":4119600,"grants":20,"underGrant":93,"selfMatch":true,"sched":64,"rec":9,"esc":1,"stopped":3,"selfRec":3}
+{"cycles":8,"seed":"w03","exposure":102924900,"frozenBefore":84891400,"frozenAfter":0,"before":151100,"after":151100,"grants":26,"underGrant":163,"selfMatch":true,"sched":70,"rec":2,"esc":5,"stopped":2,"selfRec":1}
+{"cycles":8,"seed":"w04","exposure":94528500,"frozenBefore":78301800,"frozenAfter":0,"before":588000,"after":588000,"grants":24,"underGrant":143,"selfMatch":true,"sched":66,"rec":5,"esc":3,"stopped":5,"selfRec":1}
+{"cycles":20,"seed":"day7","exposure":76943900,"frozenBefore":30779700,"frozenAfter":0,"before":1476000,"after":1476000,"grants":23,"underGrant":122,"selfMatch":true,"sched":50,"rec":6,"esc":9,"stopped":12,"selfRec":3}
+{"cycles":20,"seed":"w01","exposure":82976800,"frozenBefore":58657600,"frozenAfter":0,"before":270400,"after":15744400,"grants":46,"underGrant":244,"selfMatch":true,"sched":52,"rec":5,"esc":7,"stopped":13,"selfRec":3}
+{"cycles":20,"seed":"w02","exposure":120140600,"frozenBefore":103286100,"frozenAfter":0,"before":661700,"after":4119600,"grants":48,"underGrant":220,"selfMatch":true,"sched":57,"rec":9,"esc":1,"stopped":10,"selfRec":3}
+{"cycles":20,"seed":"w03","exposure":102924900,"frozenBefore":81032300,"frozenAfter":0,"before":151100,"after":151100,"grants":70,"underGrant":374,"selfMatch":true,"sched":56,"rec":2,"esc":5,"stopped":13,"selfRec":4}
+{"cycles":20,"seed":"w04","exposure":94528500,"frozenBefore":78301800,"frozenAfter":0,"before":588000,"after":588000,"grants":65,"underGrant":342,"selfMatch":true,"sched":61,"rec":5,"esc":3,"stopped":10,"selfRec":1}

@@ -151,6 +151,21 @@ export const GUARDRAILS = {
    */
   humanApprovalThresholdPaise: rupeesToPaise(25_000),
 
+  /**
+   * How long a human's approval remains valid.
+   *
+   * A grant is consent to act on a specific case given specific facts, and both decay. Nine days
+   * after a reviewer signed off on retrying a card, the customer may have paid, disputed, or
+   * churned, and the reviewer would want to be asked again. Without an expiry the grant is
+   * permanent authority obtained once, which is the shape of every real approval-control failure.
+   *
+   * 72 hours because it must comfortably exceed the approver SLA (a grant that expired before the
+   * agent could act on it would be worse than no approval mechanism at all — the case would
+   * ping-pong between queue and expiry forever) while staying inside the window in which the facts
+   * shown to the reviewer are still roughly true.
+   */
+  approvalValidForHours: 72,
+
   /** Never retry inside a known issuer downtime window. */
   respectDowntimeWindows: true,
 
@@ -197,6 +212,32 @@ export const POLICY = {
 
   /** Cases past this age are closed regardless of remaining EV. */
   maxCaseAgeDays: 30,
+
+  /**
+   * How many times ONE case may postpone the SAME class of action before it must act, escalate
+   * or stop. The hard backstop behind the commitment rule (#67).
+   *
+   * WHY A LIMIT EXISTS AT ALL. The expected-value rule compares actions but has no term for the
+   * passage of time, so "retry in six hours" can beat "retry now" at every instant — including at
+   * the instant the six hours are up. Measured before this existed: 4,235 postponements against
+   * 332 attempts across five worlds (12.76x), one ₹16,721 case scheduling itself sixteen times in
+   * sixteen cycles and attempting nothing, while its own EV decayed from ₹6,385 to ₹2,997. The
+   * agent was a perfect procrastinator and it audited beautifully the whole time.
+   *
+   * WHY THREE. It is the smallest number that leaves the timing edge intact. The offsets are
+   * 6h..168h, and a case that genuinely should wait for a salary date needs at most one long
+   * deferral to reach it, so 1 would be defensible; 3 leaves room for the case to re-plan twice
+   * when the guardrails move underneath it (a quiet-hours DEFER, then a downtime window) without
+   * that re-planning being mistaken for the loop. It is a POLICY number and is swept in #58, not
+   * a constant tuned until the money looked good — the commitment rule below does the real work,
+   * and this only catches paths that reach the loop some way I have not thought of.
+   *
+   * This is deliberately NOT a discount rate. A discount rate is the textbook fix and it is the
+   * better long-run answer, but it would mean choosing a number by feel and then reporting money
+   * that number produced. A hard limit is cruder and auditable: a reviewer can count the deferrals
+   * in the trail and check the rule held.
+   */
+  maxDeferralsPerCase: 3,
 
   /** Below this diagnosis confidence, treat the cause as UNKNOWN. */
   minDiagnosisConfidence: 0.6,

@@ -344,13 +344,31 @@ const batch = generateBatch({ seed: 42, split: 'TRAIN', now: NOW });
     `${retryProof}/${batch.latents.length} retry-proof, ${hopeless} never-paying`
   );
 
+  /**
+   * The floor here was 0.05 and it was wrong — not marginally, but for 18 of 22 worlds.
+   *
+   * It was set before the survivorship correction, which by design multiplies self-recovery propensity
+   * by ~0.311 (pre-registered 0.29-0.33, measured mean 0.3110 across 24 batches). Nobody re-derived the
+   * floor afterwards, and the seeded batch happened to land above it, so the invariant passed on one
+   * draw while being false of the world. Task #64's per-event RNG streams re-rolled that draw and the
+   * bound failed at 4.67% — which was the bound breaking, not the world.
+   *
+   * Measured across 22 worlds (seeds 42/4242 plus day7 and w01-w09, both splits): mean 4.28%, sd
+   * 0.76pp, range 3.00%-5.67%. `mean - 4sd` is 1.22%, so a 2% floor means "present at all" and will
+   * not fire on an unlucky draw; the 45% ceiling is untouched and nowhere near binding (max 5.67%).
+   *
+   * The name changed too. "B0 is a real but beatable baseline" overclaims what this measures: B0's own
+   * agent-side recovery is zero by construction, because self-recovery is applied identically to every
+   * arm and `RECOVERED_SELF` is a distinct terminal state. B0 is a CONTROL, not a denominator, so this
+   * check is about the world's composition and should say so.
+   */
   check(
-    'self-recovery is present but not dominant (B0 is a real but beatable baseline)',
+    'self-recovery is present but a small minority of the book',
     (() => {
       const s = batch.latents.filter((l) => l.willSelfRecover).length / batch.latents.length;
-      return s > 0.05 && s < 0.45;
+      return s > 0.02 && s < 0.45;
     })(),
-    `${((batch.latents.filter((l) => l.willSelfRecover).length / batch.latents.length) * 100).toFixed(1)}% self-recover`
+    `${((batch.latents.filter((l) => l.willSelfRecover).length / batch.latents.length) * 100).toFixed(1)}% self-recover (measured across 22 worlds: mean 4.28%, sd 0.76pp)`
   );
 }
 
