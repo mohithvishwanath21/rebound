@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { fitRecoveryScorer, buildWorld, runArm, runIdFor } from '../src/eval/harness.js';
 import { buildReference } from '../src/razorpay/gateway.js';
 import { deriveSeed } from '../src/core/rng.js';
+import { HORIZON, GUARDRAILS, describeHorizon } from '../src/core/config.js';
 
 const START = new Date('2026-08-24T09:30:00Z');
 const SEED = 'harness-test';
@@ -187,4 +188,97 @@ test('a policy that stops everything recovers nothing and still terminates every
   const open = cases.filter((c) => c.state === 'OPEN' || c.state === 'SCHEDULED');
   assert.equal(open.length, 0, `${open.length} case(s) left unresolved: a do-nothing policy must terminate them`);
   assert.equal(run.stoppedEarlyAfter, 1, 'with every case stopped in cycle 0, cycle 1 must find nothing active');
+});
+
+// =================================================================================================
+// THE HORIZON — #62. One definition, checked against the clock rather than against a parity rule.
+// =================================================================================================
+/**
+ * `HORIZON` declares 21 cycles x 12h = 10 days and two constraints: long enough for self-recovery to
+ * play out, and not ending inside quiet hours. Both used to be enforced by hand, in one command, as
+ * `cycles % 2 === 0`. These tests exist because that shortcut is only equivalent to the real
+ * constraint at one particular start instant and step size — and because the OTHER command that runs
+ * the loop defaulted to an even 8 and warned about nothing.
+ */
+test('the reference horizon satisfies both constraints and warns about nothing', () => {
+  const h = describeHorizon({ cycles: HORIZON.cycles, stepHours: HORIZON.stepHours, startAt: START });
+  assert.equal(h.days, 10, '21 cycles 12h apart spans 20 steps = 240h = 10 days');
+  assert.equal(h.truncated, false);
+  assert.equal(h.endsInQuietHours, false, 'the final cycle must land where an arm can actually contact someone');
+  assert.equal(h.isReference, true);
+  assert.deepEqual(h.warnings, [], `the default horizon must be silent, otherwise the warning is noise: ${h.warnings.join(' | ')}`);
+});
+
+test('an ODD cycle count can still end inside quiet hours — the case the parity rule missed', () => {
+  /**
+   * The point of the whole change. 21 is odd, so the old `cycles % 2 === 0` test stayed silent, but
+   * from a 21:30Z start the final cycle lands at 03:00 IST and no arm can contact anyone in it. The
+   * old rule was a consequence of the 09:00Z start, not a property of horizons, and a check that is
+   * only correct for the default arguments protects nothing the moment someone passes `--now`.
+   */
+  const h = describeHorizon({ cycles: 21, stepHours: 12, startAt: new Date('2026-08-24T21:30:00Z') });
+  assert.equal(h.endsInQuietHours, true, 'final cycle at 03:00 IST is inside the 21:00-09:00 quiet window');
+  assert.equal(h.truncated, false, 'this run is a full 10 days — the quiet-hours fault is independent of length');
+  assert.equal(h.isReference, false);
+  assert.match(h.warnings.join(' '), /quiet hours/, 'the warning must name the reason, not just fire');
+  assert.match(h.warnings.join(' '), /03:00/, 'and must print the instant, so a reader can check it against their own clock');
+});
+
+test('an EVEN cycle count can be perfectly fine — the false positive the parity rule produced', () => {
+  const h = describeHorizon({ cycles: 12, stepHours: 24, startAt: START });
+  assert.equal(h.days, 11);
+  assert.equal(h.endsInQuietHours, false, '11 days later at a 24h step is the same wall-clock time: 15:00 IST');
+  assert.equal(h.truncated, false);
+  assert.deepEqual(h.warnings, [], 'warning about a sound horizon teaches people to ignore the warnings');
+});
+
+test('a truncated horizon says so, and says which direction the bias runs', () => {
+  const h = describeHorizon({ cycles: 7, stepHours: 12, startAt: START });
+  assert.equal(h.days, 3, '7 cycles is 6 steps = 72h');
+  assert.equal(h.truncated, true);
+  assert.equal(h.isReference, false);
+  const text = h.warnings.join(' ');
+  assert.match(text, /3 days/);
+  assert.match(text, /10 days/, 'must state what the horizon should be, not merely that this one is short');
+  assert.match(text, /SPACE their attempts/, 'and must state WHO it biases against, because the bias favours Rebound');
+});
+
+test('the quiet window comes from the guardrail config, not a second copy of 21:00-09:00', () => {
+  /**
+   * A horizon check with its own hardcoded window would keep passing after someone widened
+   * `GUARDRAILS.quietHours`, and the run would then end in a window the guardrail enforces and the
+   * horizon check does not know about. Verified by moving the window rather than by reading the code.
+   */
+  const nightOwl = { ...GUARDRAILS, quietHours: { startHour: 12, endHour: 18, timezone: 'Asia/Kolkata' } };
+  const h = describeHorizon({ cycles: HORIZON.cycles, stepHours: HORIZON.stepHours, startAt: START, guardrails: nightOwl });
+  assert.equal(h.endsInQuietHours, true, 'the reference horizon ends at 15:00 IST, which this window forbids');
+});
+
+test('runArm defaults to the full HORIZON, not to a convenient small number', async () => {
+  /**
+   * `cycles = 8` used to be the default here — 4 days, short of the 10 self-recovery needs, and even,
+   * so it also ended inside quiet hours. A caller who omits the flag must get the horizon the project
+   * measures on. Asserted by running, because the default is only real if the loop honours it.
+   */
+  const { w, scoreAction } = await world({ count: 2 });
+  const run = await runArm({ world: w, arm: 'REBOUND_EV', scoreAction });
+
+  /**
+   * Read `run.horizon`, NOT `run.cycles.length`. The first assertion I wrote here used the latter and
+   * failed at 1 !== 21 — correctly, because `cycles` holds one summary per cycle that had work to do,
+   * and two cases both terminating in cycle 0 leaves exactly one summary. `cycles.length` measures
+   * how long the POLICY stayed busy; the horizon is how long the WORLD ran. The run now reports both,
+   * because the whole point of #62 was that a truncated run must not be able to read as a complete one.
+   */
+  assert.equal(run.horizon.cycles, HORIZON.cycles, 'omitting --cycles must run the reference horizon');
+  assert.equal(run.horizon.stepHours, HORIZON.stepHours);
+  assert.equal(run.horizon.days, 10);
+
+  const expected = new Date(START.getTime() + (HORIZON.cycles - 1) * HORIZON.stepHours * 3_600_000);
+  assert.equal(
+    run.endedAt.toISOString(),
+    expected.toISOString(),
+    'and the clock must actually have advanced that far — the world runs on after the policy goes quiet'
+  );
+  assert.ok(run.cycles.length <= HORIZON.cycles, 'a cycle summary per busy cycle, never more than the horizon');
 });

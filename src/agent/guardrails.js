@@ -499,6 +499,7 @@ export const APPROVAL_CHECKS = Object.freeze([
      * this flag has no business authorising a charge on its own.
      */
     id: 'APR_WEAK_DIAGNOSIS',
+    needsDiagnosticClaim: true,
     applies: (s) => s.movesMoney,
     reason: (_s, ctx) =>
       ctx.diagnosis?.requiresApprovalForMoneyMovement
@@ -525,6 +526,7 @@ export const APPROVAL_CHECKS = Object.freeze([
   },
   {
     id: 'APR_ABSTAINED_DIAGNOSIS',
+    needsDiagnosticClaim: true,
     applies: (s) => s.movesMoney,
     reason: (_s, ctx) =>
       ctx.diagnosis?.abstained ? 'diagnosis abstained; no cause was identified for this failure' : null,
@@ -538,6 +540,12 @@ export const APPROVAL_CHECKS = Object.freeze([
  * @param caseState  our own records for this case — see `normaliseCaseState`
  * @param diagnosis  output of `diagnose()`
  * @param belief     `{ p, support }` for this (case, action) pair; support may be absent
+ * @param diagnosisClaimed  whether the CALLER is relying on the diagnosis to authorise this
+ *                   action. Defaults to true, so the production path and every existing caller
+ *                   keep their current behaviour and a new caller must opt OUT deliberately. The
+ *                   fixed-rule eval baselines pass false: they carry the shared diagnosis for the
+ *                   audit trail but never read it, so a weak or abstained diagnosis is not what
+ *                   their charge rests on. See the loop below.
  * @param runState   `{ retriesThisRun, messagesThisRun }`
  * @param now        decision time
  *
@@ -551,6 +559,7 @@ export function checkGuardrails({
   caseState,
   diagnosis = null,
   belief = null,
+  diagnosisClaimed = true,
   runState = { retriesThisRun: 0, messagesThisRun: 0 },
   now = new Date(),
   config = { GUARDRAILS, POLICY },
@@ -624,6 +633,17 @@ export function checkGuardrails({
 
   for (const check of APPROVAL_CHECKS) {
     if (!check.applies(s, ctx)) continue;
+    /**
+     * Some checks are contingent on the action being authorised by a diagnostic claim. A policy
+     * that never consults diagnosis (the fixed-rule baselines) is not having its charge
+     * authorised by a weak or abstained belief — it is having it authorised by an explicit rule —
+     * so these checks must be skipped. `diagnosisClaimed` is asserted by the caller rather than
+     * inferred from `diagnosis` being non-null, because the baseline arms carry the shared
+     * diagnosis in their record and never read it; inferring from presence would gate every
+     * baseline charge behind a human and quietly improve the EV arm's headline, which is the
+     * exact confound honesty forbids. Rebound passes `diagnosisClaimed: true`.
+     */
+    if (check.needsDiagnosticClaim && !diagnosisClaimed) continue;
     const reason = check.reason(s, ctx);
     if (!reason) continue;
     if (grantClears({ grant, checkId: check.id, s })) {

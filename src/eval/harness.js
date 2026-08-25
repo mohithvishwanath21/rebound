@@ -61,8 +61,10 @@ import { createRecoveryScorer } from '../agent/recoveryModel.js';
 import { runCycle, CaseState, AuditType } from '../agent/orchestrator.js';
 import { createMemoryStore } from '../db/store.js';
 import { createSimGateway } from '../sim/simGateway.js';
-import { checkSelfRecovery, settlementAmountPaise } from '../sim/responseModel.js';
-import { GUARDRAILS, POLICY } from '../core/config.js';
+import { checkSelfRecovery, settlementAmountPaise, materialiseAssumptions } from '../sim/responseModel.js';
+import { createSimApprover } from '../sim/approver.js';
+import { percentile } from '../core/stats.js';
+import { GUARDRAILS, POLICY, HORIZON } from '../core/config.js';
 
 const HOUR_MS = 3_600_000;
 
@@ -256,8 +258,13 @@ export async function applySelfRecovery({ store, runId, now, world, cycle = 0 })
  * @param scoreAction the shared fitted model
  * @param decide      the policy under test. Omitted means `decideForCase` (the orchestrator's
  *                    default), which is REBOUND_EV.
- * @param cycles      how many times to run the loop
- * @param stepHours   how far the clock advances between cycles
+ * @param cycles      how many times to run the loop. Defaults to `HORIZON.cycles`, NOT to a
+ *                    convenient small number. It used to default to 8 (4 days), which is short of
+ *                    the 10 days self-recovery needs to play out, and a default that quietly
+ *                    truncates is worse than no default: a caller who omits the flag gets a run that
+ *                    LOOKS complete and systematically favours arms that act early. Anyone wanting a
+ *                    fast run should cut worlds or cases and keep the cycles.
+ * @param stepHours   how far the clock advances between cycles. Defaults to `HORIZON.stepHours`.
  * @param assumptions optional materialised (possibly perturbed) assumption set for the WORLD. The
  *                    agent's beliefs are in `scoreAction` and are NOT perturbed with it — see the
  *                    sensitivity sweep for why perturbing both together tests nothing.
@@ -272,8 +279,8 @@ export async function runArm({
   arm = 'REBOUND_EV',
   scoreAction,
   decide,
-  cycles = 8,
-  stepHours = 12,
+  cycles = HORIZON.cycles,
+  stepHours = HORIZON.stepHours,
   config = { GUARDRAILS, POLICY },
   assumptions,
   onCycle,
@@ -285,15 +292,32 @@ export async function runArm({
   await store.putCases(caseRecordsFor(world, runId));
 
   /**
+   * ONE materialised assumption set, shared by the gateway and the approver.
+   *
+   * `createSimGateway` will happily default to `materialiseAssumptions()` on its own, and so would a
+   * separate call here. Two independent defaults agree today by coincidence and would diverge the
+   * moment either grew a parameter — the run would then be scored in a world where the payments
+   * physics came from one assumption set and the human reviewer from another, and nothing would fail.
+   * Resolving it once here makes that impossible.
+   */
+  const A = assumptions ?? materialiseAssumptions();
+
+  /**
    * One mutable clock, closed over by both the orchestrator and the gateway. See invariant 3.
    */
   let clock = new Date(startAt);
   const gateway = createSimGateway({
     getLatent: (eventId) => world.latentById.get(eventId),
     seed: world.seed,
-    assumptions,
+    assumptions: A,
     now: () => clock,
   });
+
+  /**
+   * The human on the other side of the approval gate. Seeded from the WORLD, never from the arm, so
+   * two arms that queue the same case meet the same reviewer in the same mood — see `approver.js`.
+   */
+  const approver = createSimApprover({ seed: world.seed, assumptions: A, guardrails: config.GUARDRAILS });
 
   const cycleSummaries = [];
   let recoveredPaise = 0;
@@ -301,6 +325,14 @@ export async function runArm({
   let selfRecoveredCount = 0;
   let attempts = 0;
   let stoppedEarlyAfter = null;
+  /**
+   * Every approval the simulated reviewer answered, in order. Accumulated here rather than
+   * reconstructed from the audit trail by `metrics.js` because the DRAWN wait (what the reviewer
+   * took) and the REALISED wait (what the trail records, after pushing out of the reviewer's
+   * off-hours) are different numbers, and only one of them survives into the audit entry. Reporting
+   * both is what lets a reader check that "18-hour SLA" describes the run rather than the label.
+   */
+  const approvals = [];
 
   /**
    * THE LOOP RUNS ITS FULL HORIZON EVEN AFTER THE POLICY GOES QUIET.
@@ -320,6 +352,25 @@ export async function runArm({
     const self = await applySelfRecovery({ store, runId, now: clock, world, cycle: i });
     selfRecoveredPaise += self.selfRecoveredPaise;
     selfRecoveredCount += self.selfRecoveredCount;
+
+    /**
+     * THE REVIEWER ANSWERS, UNCONDITIONALLY, FOR EVERY ARM.
+     *
+     * Same placement and same reasoning as `applySelfRecovery` above: this is a property of the world,
+     * so it is called directly rather than through the `beforeCycle` hook. `APR_LARGE_AMOUNT` gates
+     * all five arms, so all five have a queue; an approver wired to run for Rebound alone would be
+     * the most flattering bug available in this project and the money column would look normal.
+     *
+     * AFTER self-recovery and BEFORE the policy decides. After, because a customer who has already
+     * paid should not have their case handed back to the policy by a grant — `resolveApproval` guards
+     * on state, so this is belt and braces, but the ordering is the part that makes the guard
+     * unnecessary rather than load-bearing. Before, because a grant returns the case to OPEN with a
+     * null `nextActionAt`, and the whole design of the envelope is that the agent RE-DECIDES at the
+     * current instant; deciding first and granting after would delay every granted case by a full
+     * cycle for no reason other than statement order.
+     */
+    const answered = await approver.resolvePending({ store, runId, now: clock });
+    for (const a of answered.resolved) approvals.push({ ...a, cycle: i });
 
     if (beforeCycle) await beforeCycle({ store, runId, now: clock, cycle: i, world });
 
@@ -346,7 +397,7 @@ export async function runArm({
     recoveredPaise += summary.recoveredPaise;
     attempts += summary.attempts;
     cycleSummaries.push({ ...summary, activeAtStart: active.length });
-    if (onCycle) onCycle({ ...summary, activeAtStart: active.length }, clock);
+    if (onCycle) await onCycle({ ...summary, activeAtStart: active.length }, clock);
   }
 
   return {
@@ -371,6 +422,39 @@ export async function runArm({
     selfRecoveredCount,
     attempts,
     stoppedEarlyAfter,
+    /**
+     * What the human reviewer did, and how long they took.
+     *
+     * `pendingAtEnd` is deliberately NOT computed here — it is a property of the final case records
+     * and `metrics.js` reads it from there, so the two paths can be cross-checked the way the money
+     * figures are. What this holds is the event log the case records cannot reconstruct.
+     *
+     * The two wait figures answer different questions and both are reported. `drawnWaitHours` is how
+     * long the reviewer took; `realisedWaitHours` adds the wait for them to be back at their desk, so
+     * a request raised at 20:00 with a 4-hour draw shows 4.0 and 13.0. Reporting only the first would
+     * understate the gate's real cost; only the second would make the SLA unverifiable.
+     */
+    approvals: {
+      slaHours: approver.slaHours,
+      grantRate: approver.grantRate,
+      resolved: approvals,
+      granted: approvals.filter((a) => a.state === 'GRANTED').length,
+      denied: approvals.filter((a) => a.state === 'DENIED').length,
+      grantedPaise: approvals.filter((a) => a.state === 'GRANTED').reduce((s, a) => s + a.amountPaise, 0),
+      deniedPaise: approvals.filter((a) => a.state === 'DENIED').reduce((s, a) => s + a.amountPaise, 0),
+      drawnWaitHoursP50: percentile(approvals.map((a) => a.drawnWaitHours), 50),
+      realisedWaitHoursP50: percentile(approvals.map((a) => a.realisedWaitHours), 50),
+      realisedWaitHoursP90: percentile(approvals.map((a) => a.realisedWaitHours), 90),
+      realisedWaitHoursMax: percentile(approvals.map((a) => a.realisedWaitHours), 100),
+    },
+    /**
+     * The horizon the loop ACTUALLY ran, not the one the caller meant to ask for. Reported because
+     * `cycles` above holds one summary per cycle that had work to do — an arm that goes quiet on
+     * cycle 2 reports two summaries out of twenty-one — so `cycles.length` is a measure of policy
+     * behaviour and cannot double as a record of the horizon. Conflating the two is how a truncated
+     * run reads as a complete one.
+     */
+    horizon: { cycles, stepHours, days: ((cycles - 1) * stepHours) / 24 },
     endedAt: clock,
   };
 }

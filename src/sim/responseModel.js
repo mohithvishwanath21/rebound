@@ -55,6 +55,12 @@
 import { PayerType } from './payerTypes.js';
 import { ActionKind } from '../core/actions.js';
 import { LossType } from '../core/enums.js';
+/**
+ * Imported for exactly one purpose: `approverSlaHours.sweep` derives its upper bound from
+ * `GUARDRAILS.approvalValidForHours` so the declared sweep and the guard in `sim/approver.js` cannot
+ * disagree. `core/config.js` imports only from `core/`, so this introduces no cycle.
+ */
+import { GUARDRAILS } from '../core/config.js';
 
 /**
  * Every tunable constant, with its justification and the range the sensitivity
@@ -271,6 +277,61 @@ export const ASSUMPTIONS = {
       'makes channel choice a real trade-off rather than "always use voice".',
     sweep: '+/-25%',
   },
+
+  // ------------------------------------------------------------ the human approver
+  /**
+   * MEAN hours a queued approval request waits before a human answers it.
+   *
+   * Called an SLA because that is what a finance-ops team would call it, but it is the mean of a
+   * distribution and not a promise — see `sampleApproverWait` in `approver.js`, which draws from an
+   * exponential so that some requests wait far longer. A fixed 18 hours would resolve every request
+   * in the same cycle and hide precisely the queueing behaviour this assumption exists to model.
+   *
+   * 18 HOURS, AND THE NUMBER IS CONSTRAINED FROM BOTH SIDES. It has to be well below
+   * `GUARDRAILS.approvalValidForHours` (72), or grants expire before the agent can act on them and
+   * cases ping-pong between the queue and expiry forever — `approver.js` asserts the gap rather than
+   * trusting me to remember it. It has to be well above zero, or the gate costs nothing and the
+   * project's claim that human review is a real constraint becomes decorative.
+   *
+   * LOAD-BEARING, and in a direction worth stating: a slower reviewer hurts every arm that queues
+   * anything, and Rebound queues the most, so a long SLA is the assumption most hostile to our own
+   * result. So the sweep should run as slow as it legitimately can.
+   *
+   * THE UPPER BOUND IS DERIVED, NOT CHOSEN. I first wrote `sweep: [6, 48]` by eye, and
+   * `test/approver.test.js` caught it: `createSimApprover` refuses a mean SLA above half of
+   * `GUARDRAILS.approvalValidForHours`, because past that point most grants expire before the agent
+   * can act on them and every affected case cycles between queue and expiry while the run still
+   * prints a tidy recovery figure. 48 is above 72/2, so the declared sweep was asking for a world the
+   * guard exists to reject. Rather than hardcode 36 — a second magic number that would silently
+   * disagree with the guard the moment anybody edited `approvalValidForHours` — the bound is computed
+   * from the same constant the guard reads. The two can no longer drift apart.
+   */
+  approverSlaHours: {
+    value: 18,
+    basis: 'JUDGEMENT. A reviewer working business hours answers same-day if the request arrives in ' +
+      'the morning and next-morning otherwise, which averages under a day. Nothing measured.',
+    sweep: [6, GUARDRAILS.approvalValidForHours / 2],
+  },
+
+  /**
+   * Probability a reviewer GRANTS rather than refuses.
+   *
+   * The number is not 1.0 and that is the point. An approver who always says yes is a rubber stamp,
+   * and a rubber stamp measured as a control would let this project claim it has human oversight
+   * while demonstrating none. Denials are terminal (see `resolveApproval`), so this rate directly
+   * caps the exposure any arm can ever reach — it is a ceiling on our own headline, chosen against
+   * our own interest.
+   *
+   * 0.7 because the cases that reach the queue are the large ones, where a reviewer is looking at a
+   * real charge and will sometimes know something the agent does not: the account is in
+   * renegotiation, the invoice is contested offline, the customer is about to churn.
+   */
+  approvalGrantRate: {
+    value: 0.7,
+    basis: 'JUDGEMENT. No measured base rate exists for this and I am not going to invent one. The ' +
+      'defensible claim is that the ranking of policies survives the sweep from 0.45 to 0.9.',
+    sweep: [0.45, 0.9],
+  },
 };
 
 /** Flatten ASSUMPTIONS to plain values for fast use in the hot loop. */
@@ -298,6 +359,8 @@ export function materialiseAssumptions(overrides = {}) {
     workingRailBoost: pick(ASSUMPTIONS.workingRailBoost),
     brokenRailPenalty: pick(ASSUMPTIONS.brokenRailPenalty),
     channelReach: pick(ASSUMPTIONS.channelReach),
+    approverSlaHours: pick(ASSUMPTIONS.approverSlaHours),
+    approvalGrantRate: pick(ASSUMPTIONS.approvalGrantRate),
   };
 
   return { ...flat, ...overrides };
@@ -645,6 +708,15 @@ export function perturbAssumptions(base, factor, rng) {
   for (const ch of Object.keys(out.channelReach)) {
     out.channelReach[ch] = clamp01(out.channelReach[ch] * jitter());
   }
+
+  /**
+   * The approver moves too. Floored at 0.5h rather than 0 because an instantaneous reviewer is not a
+   * perturbed human, it is the absence of the gate — a different world, not a noisier one. The grant
+   * rate is clamped to [0,1] like any probability; note that the declared sweep tops out at 0.9 and
+   * NOT at 1.0, deliberately, so no run in the sweep is ever handed a rubber stamp.
+   */
+  out.approverSlaHours = Math.max(0.5, out.approverSlaHours * ratio(ASSUMPTIONS.approverSlaHours));
+  out.approvalGrantRate = clamp01(out.approvalGrantRate * ratio(ASSUMPTIONS.approvalGrantRate));
 
   return out;
 }

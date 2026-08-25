@@ -41,20 +41,168 @@ import { PayerType } from './payerTypes.js';
 import { ASSUMPTIONS } from './responseModel.js';
 
 /**
- * Bumped to 1.1.0 when self-recovery gained its survivorship conditioning, and to 1.2.0 when each
- * event got its own RNG stream. `batchIdFor` folds this into every batch id precisely so that a change
+ * Bumped to 1.1.0 when self-recovery gained its survivorship conditioning, to 1.2.0 when each
+ * event got its own RNG stream, and to 1.3.0 when the rail draw stopped discarding the customer's
+ * preferred rail. `batchIdFor` folds this into every batch id precisely so that a change
  * to the world cannot be mistaken for a change in results: any number computed against a `g100` batch
- * is not comparable to one computed against `g110` or `g120`, and the id says so out loud.
+ * is not comparable to one computed against `g110`, `g120` or `g130`, and the id says so out loud.
  *
  * 1.2.0 changes every event in every batch, because it changes the order numbers are drawn in. It
  * buys the property the Day 8 sensitivity sweep is built on — perturbing one world parameter perturbs
  * one thing — and it invalidates every figure measured against g110. Anything quoted from a g110 run
  * has to be re-measured rather than carried forward.
+ *
+ * 1.3.0 (#65) does NOT change the number of draws — a case still consumes exactly the same count, so
+ * amounts and timings stay where they were — but it changes the OUTCOME of the rail draw for most
+ * cases, and rail feeds `railSuccess`, `channelReach` and therefore every recovery probability. So
+ * g120 figures are void for the same reason: re-measure, do not carry forward. The bug it fixes is
+ * written up under `chosenRail` below, and `probe-rail.mjs` holds the before-and-after measurement.
  */
-export const GENERATOR_VERSION = '1.2.0';
+export const GENERATOR_VERSION = '1.3.0';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
+
+/**
+ * P(trueRootCause | payerType, lossType).
+ *
+ * The overlap is the point. Note DO_NOT_HONOUR appearing under four different payer
+ * types — that single row is why the ambiguous bucket must be handled with bounded
+ * caution rather than confidence, and why an agent cannot simply memorise a code.
+ */
+// Exported so `npm run describe-sim` can print it. This table is the single most
+// important disclosure in the project: it is the overlap between payer types that makes
+// diagnosis a real inference problem rather than a lookup, so a reader has to be able to
+// see it. Safe to export because the boundary test forbids `src/agent/**` from importing
+// anything under `src/sim/**` at all.
+export const CAUSE_GIVEN_PAYER = {
+  [PayerType.WILL_PAY_IF_REMINDED]: {
+    FAILED_PAYMENT: { AUTH_NOT_COMPLETED: 0.42, ISSUER_DOWNTIME: 0.24, DO_NOT_HONOUR: 0.19, LIMIT_EXCEEDED: 0.15 },
+    FAILED_SUBSCRIPTION: { ISSUER_DOWNTIME: 0.34, DO_NOT_HONOUR: 0.33, LIMIT_EXCEEDED: 0.18, INSUFFICIENT_FUNDS: 0.15 },
+    OVERDUE_INVOICE: { INVOICE_FORGOTTEN: 1.0 },
+  },
+  [PayerType.TEMPORARILY_SHORT]: {
+    FAILED_PAYMENT: { INSUFFICIENT_FUNDS: 0.72, DO_NOT_HONOUR: 0.2, LIMIT_EXCEEDED: 0.08 },
+    FAILED_SUBSCRIPTION: { INSUFFICIENT_FUNDS: 0.78, DO_NOT_HONOUR: 0.22 },
+    OVERDUE_INVOICE: { INVOICE_FORGOTTEN: 1.0 },
+  },
+  [PayerType.NEEDS_NEW_INSTRUMENT]: {
+    // The 0.14 on DO_NOT_HONOUR is the hard case: a dead card reported as a generic
+    // decline. An agent that trusts the code will retry it three times for nothing.
+    FAILED_PAYMENT: { EXPIRED_INSTRUMENT: 0.62, DO_NOT_HONOUR: 0.14, LIMIT_EXCEEDED: 0.08, MANDATE_REVOKED: 0.16 },
+    FAILED_SUBSCRIPTION: { MANDATE_REVOKED: 0.48, EXPIRED_INSTRUMENT: 0.38, DO_NOT_HONOUR: 0.14 },
+    OVERDUE_INVOICE: { INVOICE_FORGOTTEN: 1.0 },
+  },
+  [PayerType.DISPUTING]: {
+    FAILED_PAYMENT: { RISK_BLOCKED: 0.3, DO_NOT_HONOUR: 0.4, AUTH_NOT_COMPLETED: 0.3 },
+    FAILED_SUBSCRIPTION: { MANDATE_REVOKED: 0.55, DO_NOT_HONOUR: 0.45 },
+    OVERDUE_INVOICE: { INVOICE_DISPUTED: 1.0 },
+  },
+  [PayerType.NEVER_PAYING]: {
+    FAILED_PAYMENT: { RISK_BLOCKED: 0.26, DO_NOT_HONOUR: 0.34, EXPIRED_INSTRUMENT: 0.22, AUTH_NOT_COMPLETED: 0.18 },
+    FAILED_SUBSCRIPTION: { MANDATE_REVOKED: 0.42, DO_NOT_HONOUR: 0.3, EXPIRED_INSTRUMENT: 0.28 },
+    OVERDUE_INVOICE: { INVOICE_FORGOTTEN: 0.55, INVOICE_DISPUTED: 0.45 },
+  },
+};
+
+/**
+ * Weights for the rail a case is attempted on, given the rail its customer prefers.
+ *
+ * THIS IS A FUNCTION BECAUSE THE OBJECT LITERAL IT REPLACES WAS SILENTLY BROKEN, AND THAT IS WORTH
+ * READING (#65). It used to be written inline as:
+ *
+ *   rng.weighted({
+ *     [customer.preferredRail]: 0.7,
+ *     [Rail.UPI]: 0.12, [Rail.CARD]: 0.12, [Rail.NETBANKING]: 0.06,
+ *   })
+ *
+ * `Rail` has exactly three members, and all three are named LITERALLY after the computed key. In a
+ * JavaScript object literal a later duplicate key overwrites an earlier one, so `[preferredRail]: 0.7`
+ * was replaced by 0.12 or 0.06 on every single case, for every customer. The customer's preferred rail
+ * had no effect whatsoever. `probe-rail.mjs` measured it across 8 worlds before the fix:
+ * P(rail | preferredRail) was 40/40/20 for all three preferences, identical to three decimal places,
+ * and a netbanking-preferring customer was attempted on netbanking 18.7% of the time — their LEAST
+ * likely rail.
+ *
+ * It is a good example of a defect that reading the output could never catch. Nothing crashed, no
+ * distribution looked odd in isolation, and every rail still appeared at a plausible-looking rate. The
+ * only way to see it was to condition on the input that was supposed to matter.
+ *
+ * The weights are now built ADDITIVELY: a base spread of 0.12/0.12/0.06 across the three rails, with
+ * the preference adding 0.7 on top. That reading is what the original numbers were reaching for —
+ * 0.7 + 0.12 + 0.12 + 0.06 sums to exactly 1.0, which is not a coincidence — and it gives the
+ * preferred rail 0.82 against 0.12 and 0.06. The alternative reading (preferred = 0.7 flat, others at
+ * base) totals 0.88 and lands within a few points of the same place; the additive form is chosen
+ * because it sums to one exactly and because it cannot degenerate no matter which rail is preferred.
+ *
+ * ONE DRAW, EXACTLY AS BEFORE. `rng.weighted` consumes a single number whatever the weights are, so
+ * this fix does not shift the draw order inside a case — the property `generateEvents` is built on.
+ */
+export function railWeightsFor(preferredRail) {
+  const weights = { [Rail.UPI]: 0.12, [Rail.CARD]: 0.12, [Rail.NETBANKING]: 0.06 };
+  if (!(preferredRail in weights)) {
+    throw new Error(
+      `railWeightsFor: ${preferredRail} is not a known rail, so the preference would be dropped ` +
+        'silently — which is the exact bug this function exists to prevent'
+    );
+  }
+  weights[preferredRail] += 0.7;
+  return weights;
+}
+
+/**
+ * Return a copy of a cause table with one cause's weight multiplied and every row renormalised.
+ *
+ * The knob #58's cause-mix arm turns. Tilting toward `DO_NOT_HONOUR` is the interesting direction:
+ * it is the generic bank decline that appears under four different payer types, so raising its share
+ * makes the world MORE ambiguous without changing anything an agent can observe about how ambiguous it
+ * is. A policy whose advantage comes from genuinely handling uncertainty should degrade gently; one
+ * whose advantage came from the cause distribution happening to suit its rule table should fall over.
+ *
+ * Renormalising matters more than it looks. `rng.weighted` normalises internally, so an un-normalised
+ * table still draws perfectly well — it just draws from a distribution that no longer matches the one
+ * `npm run describe-sim` prints for a reader to check the experiment against. Silent divergence
+ * between the disclosed world and the simulated one is the worst outcome available here.
+ *
+ * Refuses two no-ops rather than performing them:
+ *   - a cause that appears in no row, because a sweep row labelled "cause mix shifted" that shifted
+ *     nothing is the failure #59 was about, and a typo in a cause name is the obvious way to get one;
+ *   - a factor of zero or less, because removing a cause entirely is a different experiment
+ *     (it changes which causes EXIST, not their mix) and should be written as one.
+ */
+export function tiltCauseMix(table, { cause, factor }) {
+  if (!(factor > 0)) {
+    throw new Error(`tiltCauseMix: factor must be positive, got ${factor}`);
+  }
+
+  let touched = 0;
+  const out = {};
+  for (const [payerType, byLoss] of Object.entries(table)) {
+    out[payerType] = {};
+    for (const [lossType, dist] of Object.entries(byLoss)) {
+      if (!(cause in dist)) {
+        // Copied by reference-free clone but numerically untouched. An OVERDUE_INVOICE row that is
+        // {INVOICE_FORGOTTEN: 1.0} must come out exactly {INVOICE_FORGOTTEN: 1.0}, not 0.9999999.
+        out[payerType][lossType] = { ...dist };
+        continue;
+      }
+      touched += 1;
+      const scaled = { ...dist, [cause]: dist[cause] * factor };
+      const total = Object.values(scaled).reduce((a, b) => a + b, 0);
+      out[payerType][lossType] = Object.fromEntries(
+        Object.entries(scaled).map(([k, v]) => [k, v / total])
+      );
+    }
+  }
+
+  if (touched === 0) {
+    throw new Error(
+      `tiltCauseMix: "${cause}" appears in no row of the table, so this tilt would change nothing ` +
+        'while being labelled a shift'
+    );
+  }
+  return out;
+}
 
 export const DEFAULT_PARAMS = {
   customers: 220,
@@ -122,6 +270,28 @@ export const DEFAULT_PARAMS = {
 
   b2bShare: 0.25,
 
+  /**
+   * P(trueRootCause | payerType, lossType), as a PARAMETER rather than the module constant it used
+   * to be (#66).
+   *
+   * The table itself is unchanged and still lives in `CAUSE_GIVEN_PAYER` above — this is a reference
+   * to it, so the default world is bit-identical. What changes is reachability: `generateBatch`'s
+   * `overrides` can now replace it, which is the only reason #58's cause-mix arm can exist at all.
+   * Before this, the sweep could perturb the payer mix, the amounts and the self-recovery rate, but
+   * not the composition of root causes — and the cause composition is precisely the shift that
+   * attacks the diagnosis layer the whole project rests on. Exactly the failure #59 fixed for
+   * `selfRecoveryRate`: a sweep that cannot move the thing most able to embarrass you reports
+   * reassurance rather than sensitivity.
+   *
+   * REPLACED WHOLESALE, NOT DEEP-MERGED, and that is deliberate. `generateBatch` spreads overrides
+   * one level deep, so supplying `causeGivenPayer` substitutes the entire table. A deep merge would
+   * let a caller override two entries of a five-entry row and leave a distribution summing to 0.8
+   * without anything complaining — `rng.weighted` normalises internally, so the draw would still
+   * work and would silently disagree with the table `npm run describe-sim` prints. Build perturbed
+   * tables with `tiltCauseMix`, which renormalises and refuses a no-op.
+   */
+  causeGivenPayer: CAUSE_GIVEN_PAYER,
+
   amounts: {
     B2C: { muLogRupees: 6.6, sigma: 0.85 },   // median ~₹735, long right tail
     B2B: { muLogRupees: 10.3, sigma: 0.95 },  // median ~₹30k, some large
@@ -151,47 +321,6 @@ export const TEST_PARAM_SHIFT = {
   },
 };
 
-/**
- * P(trueRootCause | payerType, lossType).
- *
- * The overlap is the point. Note DO_NOT_HONOUR appearing under four different payer
- * types — that single row is why the ambiguous bucket must be handled with bounded
- * caution rather than confidence, and why an agent cannot simply memorise a code.
- */
-// Exported so `npm run describe-sim` can print it. This table is the single most
-// important disclosure in the project: it is the overlap between payer types that makes
-// diagnosis a real inference problem rather than a lookup, so a reader has to be able to
-// see it. Safe to export because the boundary test forbids `src/agent/**` from importing
-// anything under `src/sim/**` at all.
-export const CAUSE_GIVEN_PAYER = {
-  [PayerType.WILL_PAY_IF_REMINDED]: {
-    FAILED_PAYMENT: { AUTH_NOT_COMPLETED: 0.42, ISSUER_DOWNTIME: 0.24, DO_NOT_HONOUR: 0.19, LIMIT_EXCEEDED: 0.15 },
-    FAILED_SUBSCRIPTION: { ISSUER_DOWNTIME: 0.34, DO_NOT_HONOUR: 0.33, LIMIT_EXCEEDED: 0.18, INSUFFICIENT_FUNDS: 0.15 },
-    OVERDUE_INVOICE: { INVOICE_FORGOTTEN: 1.0 },
-  },
-  [PayerType.TEMPORARILY_SHORT]: {
-    FAILED_PAYMENT: { INSUFFICIENT_FUNDS: 0.72, DO_NOT_HONOUR: 0.2, LIMIT_EXCEEDED: 0.08 },
-    FAILED_SUBSCRIPTION: { INSUFFICIENT_FUNDS: 0.78, DO_NOT_HONOUR: 0.22 },
-    OVERDUE_INVOICE: { INVOICE_FORGOTTEN: 1.0 },
-  },
-  [PayerType.NEEDS_NEW_INSTRUMENT]: {
-    // The 0.14 on DO_NOT_HONOUR is the hard case: a dead card reported as a generic
-    // decline. An agent that trusts the code will retry it three times for nothing.
-    FAILED_PAYMENT: { EXPIRED_INSTRUMENT: 0.62, DO_NOT_HONOUR: 0.14, LIMIT_EXCEEDED: 0.08, MANDATE_REVOKED: 0.16 },
-    FAILED_SUBSCRIPTION: { MANDATE_REVOKED: 0.48, EXPIRED_INSTRUMENT: 0.38, DO_NOT_HONOUR: 0.14 },
-    OVERDUE_INVOICE: { INVOICE_FORGOTTEN: 1.0 },
-  },
-  [PayerType.DISPUTING]: {
-    FAILED_PAYMENT: { RISK_BLOCKED: 0.3, DO_NOT_HONOUR: 0.4, AUTH_NOT_COMPLETED: 0.3 },
-    FAILED_SUBSCRIPTION: { MANDATE_REVOKED: 0.55, DO_NOT_HONOUR: 0.45 },
-    OVERDUE_INVOICE: { INVOICE_DISPUTED: 1.0 },
-  },
-  [PayerType.NEVER_PAYING]: {
-    FAILED_PAYMENT: { RISK_BLOCKED: 0.26, DO_NOT_HONOUR: 0.34, EXPIRED_INSTRUMENT: 0.22, AUTH_NOT_COMPLETED: 0.18 },
-    FAILED_SUBSCRIPTION: { MANDATE_REVOKED: 0.42, DO_NOT_HONOUR: 0.3, EXPIRED_INSTRUMENT: 0.28 },
-    OVERDUE_INVOICE: { INVOICE_FORGOTTEN: 0.55, INVOICE_DISPUTED: 0.45 },
-  },
-};
 
 /**
  * Realistic-looking Razorpay-shaped error payloads per true cause.
@@ -459,7 +588,7 @@ export function generateEvents({ seed, params, now, customers }) {
 
     // LATENT FIRST, then a consistent observable error. Never the other way round.
     const payerType = rng.weighted(params.payerTypeMix);
-    const causeDist = CAUSE_GIVEN_PAYER[payerType][lossType];
+    const causeDist = params.causeGivenPayer[payerType][lossType];
     const trueRootCause = rng.weighted(causeDist);
 
     /**
@@ -470,12 +599,7 @@ export function generateEvents({ seed, params, now, customers }) {
      * couple a `lossTypeMix` sweep to the amounts WITHIN each case, which is the same confound at
      * smaller scale. The rule this file follows: a case consumes a fixed number of draws.
      */
-    const chosenRail = rng.weighted({
-      [customer.preferredRail]: 0.7,
-      [Rail.UPI]: 0.12,
-      [Rail.CARD]: 0.12,
-      [Rail.NETBANKING]: 0.06,
-    });
+    const chosenRail = rng.weighted(railWeightsFor(customer.preferredRail));
     const rail = lossType === LossType.OVERDUE_INVOICE ? Rail.NETBANKING : chosenRail;
 
     const ageDays = rng.float(0.2, params.historyDays);

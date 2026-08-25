@@ -52,8 +52,8 @@
  * Flags (all --name=value; the spaced form is a hard error — see cli/flags.js):
  *   --seed=day7        seeds generation, the model's outcome draws, AND the gateway's draws
  *   --count=80         cases in the run
- *   --cycles=8         how many times to run the loop
- *   --step-hours=12    how far the clock advances between cycles
+ *   --cycles=21        defaults to HORIZON.cycles — the horizon the eval measures on
+ *   --step-hours=12    defaults to HORIZON.stepHours
  *   --split=TRAIN      which generator split to run on
  *   --now=...          ISO start instant. A fixed default, NOT the wall clock — see below.
  *   --trail=1          how many per-case lifecycle audit trails to print
@@ -62,7 +62,15 @@
  */
 
 import { fitRecoveryScorer, buildWorld, runArm } from '../harness.js';
-import { GUARDRAILS, POLICY } from '../../core/config.js';
+import { GUARDRAILS, POLICY, HORIZON, describeHorizon } from '../../core/config.js';
+import { CUSTOMER_MESSAGE_WINDOW_DAYS } from '../../agent/guardrails.js';
+/**
+ * The rolling-window audit lives in `metrics.js` rather than here so that this command and
+ * `npm run eval` cannot drift apart on what counts as a breach — the eval asserts the engine-side
+ * and ledger-side counts agree, and that assertion is only meaningful if the ledger side is one
+ * function. An inline copy in this file is how the run-total-versus-7-day-cap bug survived.
+ */
+import { auditContactWindows } from '../metrics.js';
 import { readFlags, asNumber } from './flags.js';
 
 /**
@@ -74,7 +82,22 @@ const DEFAULT_NOW = '2026-08-24T09:30:00Z';
 
 const f = readFlags(
   process.argv.slice(2),
-  { seed: 'day7', count: '80', cycles: '8', 'step-hours': '12', split: 'TRAIN', now: DEFAULT_NOW, trail: '1' },
+  {
+    seed: 'day7',
+    count: '80',
+    /**
+     * `HORIZON`, not the 8 that used to sit here. 8 cycles x 12h is 4 days, which is short of the 10
+     * days self-recovery needs, AND — because 8 is even from a 09:00 UTC start — it ended the run
+     * inside quiet hours, so the final cycle could do no contacting work and the count of cases
+     * still in flight was partly an artifact of where the clock stopped. Both faults were already
+     * documented in config.js while this command quietly defaulted into them.
+     */
+    cycles: String(HORIZON.cycles),
+    'step-hours': String(HORIZON.stepHours),
+    split: 'TRAIN',
+    now: DEFAULT_NOW,
+    trail: '1',
+  },
   ['json', 'quiet'],
   (raw) => {
     const split = String(raw.split).toUpperCase();
@@ -203,15 +226,35 @@ for (const a of allActions) {
 const recoveredFromCases = finalCases.reduce((s, c) => s + (c.recoveredPaise ?? 0), 0);
 const ledgerAgrees = recoveredFromCases === recoveredPaise;
 
-const contactsByCustomer = new Map();
-for (const a of allActions) {
-  if (!a.channel || a.state !== 'SETTLED') continue;
-  contactsByCustomer.set(a.customerId, (contactsByCustomer.get(a.customerId) ?? 0) + 1);
-}
-const maxContacts = contactsByCustomer.size ? Math.max(...contactsByCustomer.values()) : 0;
-const capBreaches = [...contactsByCustomer.entries()]
-  .filter(([, n]) => n > GUARDRAILS.maxMessagesPerCustomerPer7Days)
-  .map(([customerId, n]) => ({ customerId, messages: n }));
+/**
+ * THE CONTACT-CAP CHECK, ON THE WINDOW THE RULE IS ACTUALLY WRITTEN OVER.
+ *
+ * This block used to count every message a customer received across the WHOLE RUN and compare that
+ * total against `maxMessagesPerCustomerPer7Days`. That was correct only by accident: the run was 8
+ * cycles x 12h = 4 days, and 4 days is shorter than the rule's 7-day window, so the run total and
+ * the window count were the same number.
+ *
+ * Extending the horizon to 10 days (#62) broke it immediately and loudly — this command started
+ * reporting "7 CUSTOMERS OVER THE CAP, worst 4 of 2" for the same policy that `npm run eval` scores
+ * at ZERO cap breaches. Both cannot be right. The eval is: it counts a breach only when the
+ * GUARDRAIL ENGINE itself flagged the chosen action as violating `TIM_CUSTOMER_MESSAGE_CAP` and the
+ * arm executed anyway. Four messages across ten days is fully compliant — two early, two after the
+ * window has slid past them — and this report was calling it a violation.
+ *
+ * Which makes it the most dangerous shape of bug available to this project: a compliance check that
+ * reports a breach that did not happen. "Our controls hold" is the central claim, and a checker that
+ * cries wolf on a compliant run is indistinguishable, to a reader, from one that missed a real
+ * breach. It also would have been read the other way round in a demo — a judge seeing this line
+ * would conclude the guardrails leak.
+ *
+ * So the check now asks the rule's own question at each send — how many messages to this customer
+ * were already inside the trailing window? — and it asks it through `auditContactWindows`, which
+ * `npm run eval` also uses, so the two commands cannot drift apart on what a breach is.
+ */
+const capAudit = auditContactWindows(allActions, { cap: GUARDRAILS.maxMessagesPerCustomerPer7Days });
+const maxContacts = capAudit.worstInWindow;
+const maxOverWholeRun = capAudit.worstOverWholeRun;
+const capBreaches = capAudit.breaches;
 
 // The trail is worth more on a case that actually did something, so prefer the busiest lifecycle.
 const auditCounts = [];
@@ -245,12 +288,16 @@ for (const c of finalCases) {
 }
 const autonomousExposurePaise = totalExposurePaise - awaitingHumanPaise - escalatedPaise;
 
+const horizon = describeHorizon({ cycles: f.cycles, stepHours: f.stepHours, startAt });
+
 if (asJson) {
   console.log(JSON.stringify({
     seed: f.seed,
     split: f.split,
     startAt: startAt.toISOString(),
     stepHours: f.stepHours,
+    horizonDays: horizon.days,
+    horizonWarnings: horizon.warnings,
     cyclesRequested: f.cycles,
     cyclesRun: cycles.length,
     cases: finalCases.length,
@@ -278,7 +325,9 @@ if (asJson) {
     finalStates: Object.fromEntries(stateMix),
     actionMix: Object.fromEntries(actionMix),
     compliance: {
-      maxMessagesToOneCustomer: maxContacts,
+      maxMessagesToOneCustomerInWindow: maxContacts,
+      maxMessagesToOneCustomerOverWholeRun: maxOverWholeRun,
+      windowDays: CUSTOMER_MESSAGE_WINDOW_DAYS,
       capPerCustomerPer7Days: GUARDRAILS.maxMessagesPerCustomerPer7Days,
       breaches: capBreaches,
     },
@@ -290,7 +339,13 @@ if (asJson) {
   L.push('  REBOUND — ORCHESTRATED RUN REPORT  (Day 7)');
   L.push('  ' + '='.repeat(90));
   L.push(`  seed ${f.seed}   split ${f.split}   cases ${finalCases.length}   ${cycles.length} cycles` +
-    `   ${f.stepHours}h apart from ${startAt.toISOString()}`);
+    `   ${f.stepHours}h apart from ${startAt.toISOString()}   = ${horizon.days} days`);
+  /**
+   * The same two horizon warnings `npm run eval` prints, from the same function. This command used to
+   * print none, which is how it kept an EVEN default for a week: the constraint was written down in
+   * config.js and enforced in only one of the two commands that needed it.
+   */
+  for (const w of horizon.warnings) L.push(`  ! ${w}`);
   L.push(`  model: LOGISTIC over ${logistic.weights.length} observable features + Platt (a=${logPlatt.a.toFixed(4)}` +
     ` b=${logPlatt.b.toFixed(4)}), support from GROUP BY over ${lookup.groups} cells`);
   L.push(`  gateway: SIM — every rupee below is SIMULATED. No Razorpay call was made and no money moved.`);
@@ -376,8 +431,13 @@ if (asJson) {
 
   L.push('  COMPLIANCE, MEASURED RATHER THAN ASSERTED');
   L.push('  ' + '-'.repeat(90));
-  L.push(`  Per-customer message cap: ${GUARDRAILS.maxMessagesPerCustomerPer7Days} per 7 days.` +
-    `  Worst case observed in this run: ${maxContacts}.`);
+  L.push(`  Per-customer message cap: ${GUARDRAILS.maxMessagesPerCustomerPer7Days} per ${CUSTOMER_MESSAGE_WINDOW_DAYS} days (rolling).`);
+  L.push(`  Worst ${CUSTOMER_MESSAGE_WINDOW_DAYS}-day window observed: ${maxContacts}.` +
+    `  Most messages to one customer over the whole ${horizon.days}-day run: ${maxOverWholeRun}.`);
+  if (maxOverWholeRun > GUARDRAILS.maxMessagesPerCustomerPer7Days && !capBreaches.length) {
+    L.push(`  (${maxOverWholeRun} over ${horizon.days} days is COMPLIANT — the window slides. Comparing a run total`);
+    L.push('   against a 7-day cap is what this report used to do, and it reported breaches that never happened.)');
+  }
   if (capBreaches.length) {
     L.push(`  !! ${capBreaches.length} CUSTOMER(S) OVER THE CAP — the cross-case control did not hold:`);
     for (const b of capBreaches.slice(0, 5)) L.push(`     ${b.customerId}: ${b.messages} messages`);

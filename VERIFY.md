@@ -561,7 +561,134 @@ measurements, and the honest version of this project prints them rather than bur
 
 ---
 
-## 12. What is proven versus what is measured
+## 12. The five-arm comparison — the Track 03 headline
+
+    npm run eval
+
+Five policies run against the **same worlds, the same trained model, the same random luck and the same
+clock**, scored by one function. 5 worlds x 80 cases on the held-out TEST split, 21 cycles x 12h =
+10 simulated days. Takes about a minute. **Exit code 1 if any invariant fails**, and in that case the
+headline is suppressed rather than printed with a warning — a number nobody can trust should not be
+available to copy.
+
+Read the output in this order.
+
+**First, the four things held identical.** The run prints them. If any of the four drifted between
+arms the comparison means nothing, so the harness asserts them rather than documenting them:
+same world (same seed, same generator version), same model (one fit, shared), same luck (the same
+`runId` in separate stores, so identical coin flips), same clock.
+
+**Second, the compliance columns.** `quiet!`, `cap!` and `ABS!` count rules actually broken by actions
+actually taken. Expect **B2_AGGRESSIVE at 549-578 quiet-hours messages and 966-1,040 contact-cap
+breaches per world, and exactly zero of both for B1, B3 and Rebound.** The `worst7d` column is the one
+to read out loud: B2 reaches **30 to 45 messages to a single customer inside seven days against a cap of
+2**, while Rebound sits at **exactly 2 of 2 — the cap binds and is never crossed**. That is the point of
+the comparison: B2 is what "just retry harder" looks like when nobody is counting.
+
+Do **not** read `refused` as a cross-arm number. It counts refused *candidates*, and the arms enumerate
+completely different numbers of candidates per cycle — Rebound prices the whole action space, B1
+considers one thing. Its only honest use is the zero test: non-zero means the guardrail engine binds on
+that arm at all.
+
+**Third, the money, on the incremental basis.** Both money columns net out B0_DO_NOTHING's
+counterfactual, so **B0 sits at exactly ₹0 in both by construction** — that zero is the check that the
+subtraction is happening on the basis it was measured on. Gross recovery is not printed as a headline
+anywhere, because an arm that reaches a case on day 2 which would have paid unprompted on day 9 books
+the full amount as its own.
+
+Expect, against **B3_FIXED_LADDER** (the compliant, competently-designed baseline — the comparison that
+matters): mean **+₹78,530** incremental, range **−₹40,591 to +₹3,83,975**, sd **₹1,72,568**, **ahead in
+4 of 5 worlds**, pooled 1.93x.
+
+**Quote the sign count, not the ratio.** The sd is more than twice the mean, the range crosses zero, and
+the pooled 1.93x is carried almost entirely by seed 1 — where Rebound takes ₹4,56,975 against B3's
+₹73,000. Drop that one world and the effect is modest. "4 of 5 worlds, one negative, sd larger than the
+mean" is the honest sentence. There is no p-value at n=5 and the run does not print one; it prints the
+mean with the range, the sd, the sign count and the n.
+
+**And against B2_AGGRESSIVE, the rule-breaker, Rebound loses: mean −₹42,194, ahead in 2 of 5 worlds,
+pooled 0.79x.** This is stated here rather than left for a reader to find. Before Day 8 gave the
+approval queue a human to answer it, this comparison was a tie; unfreezing the queue helped B2 more,
+because B2 queues fewer requests and had less exposure stuck behind the gate.
+
+On money alone, over ten days, on held-out worlds, the rule-breaking baseline beats us. What the same
+table also shows is the price of being B2: ~1,100 messages per world with about half inside quiet hours,
+30-45 messages to one customer in a week against a cap of 2, and a volume the run's own circuit-breaker
+audit flags **"YES — production would have truncated this arm"** at 1,155 messages against a production
+cap of 250. B2's figure is not one a merchant could run; it is what you get with the compliance rules
+switched off. B3 is therefore the comparison the experiment was built around — which was its stated
+design before this result came in, not a line drawn after seeing it.
+
+**Fourth, the horizon.** If you shorten the run you will make Rebound look better, which is why the
+report prints a HORIZON TRUNCATION block with per-arm `pendingActions` whenever the horizon is under
+10 days. See it for yourself:
+
+    node src/eval/cli/run.js --seeds=1 --count=40 --cycles=7
+
+Every baseline reports ₹0 and Rebound reports money, because 3.5 days cuts off the arms that *space*
+their attempts. To run a fast smoke test, cut worlds and cases and keep all 21 cycles:
+
+    npm run eval-smoke
+
+**Two bugs found by reading this output rather than trusting it**, both of which had been inflating
+Rebound. B3's retry ladder anchored its "+24h" rung to `now`, so each re-decision at wakeup produced a
+fresh +24h and the ladder never advanced — 65 of 80 cases got exactly one action in ten days. And
+`netPaise` was gross-minus-costs printed beside an incremental column, so one arm showed a net larger
+than the money it was derived from. Both are described in `ENGINEERING_LOG.md` under Day 8. The
+trajectory tests that would have caught the first one now exist:
+
+    node --test test/baselines.test.js
+
+**Expect 35 tests, 35 pass.** The ones that matter run an arm for a full horizon and assert that cases
+*progress* — no test of a single decision can see a policy that never advances.
+
+### 12a. The approval gate, and the human on the other side of it
+
+Actions on cases above ₹25,000 do not execute without a named human. Until Day 8 the gate was
+write-only: cases went in and nothing came out, which stranded roughly **72% of Rebound's exposure** in
+`AWAITING_APPROVAL` at the horizon. Every money figure measured before the reviewer existed was measured
+in a world where the merchant installed an approval queue and hired nobody to answer it — not a
+conservative world, an incoherent one. `src/sim/approver.js` answers it. Look at the queue directly:
+
+    node src/eval/cli/run.js --seeds=1,2,3,4,5 --count=80 --split=TEST
+
+The **HUMAN APPROVAL** section prints, per world and per arm: how many authorisations were asked for,
+granted, denied and still pending; the exposure frozen at the horizon; the exposure a human **refused**;
+and the realised p50 and p90 wait. Three things in it are worth checking on purpose.
+
+**The reviewer is a property of the world, not of the policy.** Its disposition is seeded from the world
+seed and the `eventId` — deliberately **not** from the arm, the cycle, or the request time. If the arm
+entered that seed, two policies queueing the same case would meet different reviewers, the high-value
+cases would be granted to one and refused to another, and the difference would land in the money column
+with nothing else noticing. The `approverIsArmBlind` invariant compares every case the reviewer answered
+across all five arms and **suppresses the entire headline** if any case got two different verdicts.
+
+**`asked` can exceed granted + denied + pending, and that is correct.** A grant is an envelope that
+expires after 72 hours, so a case whose authorisation lapsed comes back for a fresh signature instead of
+acting on a stale one. In seed 1, Rebound's reviewer logged 19 grants while only 9 cases *ended* in
+GRANTED, because 7 cases returned to the queue — one of them four times. This is also where an invariant
+of mine was wrong: it compared the reviewer's tally to the per-case census, which counts different
+things, and failed in all five worlds until it was pointed at the audit event counts.
+
+**`refused` is printed beside `frozen` on purpose.** Denials are terminal, so refused exposure is money
+the policy is permanently barred from by a decision it does not control — a ceiling on our own headline,
+₹30,488 to ₹2,65,328 per world. It is printed so `frozen: 0` cannot be misread as "nothing was blocked".
+
+The reviewer's two parameters are **declared assumptions, not measurements**: an 18-hour mean SLA and a
+0.7 grant rate, both marked `JUDGEMENT` in `src/sim/responseModel.js` with their sweep ranges. The grant
+rate sweep tops out at 0.9 and never reaches 1.0, so no run in the sensitivity analysis is handed a
+rubber stamp. The reviewer has **no capacity limit** — 40 simultaneous requests are answered as fast as
+one — and that omission flatters us rather than being neutral, because Rebound queues the most.
+
+    node --test test/approver.test.js
+
+**Expect 34 tests, 34 pass**, including the wait distribution hand-checked at u=0 and u=1−1/e, the
+reviewer's business-hours deferral, and 500 sweep perturbations that must never trip the approver's own
+SLA guard.
+
+---
+
+## 13. What is proven versus what is measured
 
 Two claims, never mixed, and the difference is the whole argument:
 
@@ -579,7 +706,7 @@ No command in this repo produces a number that mixes the two.
 
 ---
 
-## 13. Git history
+## 14. Git history
 
     git log --oneline
     git show --stat HEAD

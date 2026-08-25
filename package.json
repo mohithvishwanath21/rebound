@@ -16,12 +16,13 @@
     "api": "node src/api/server.js",
     "eval": "node src/eval/cli/run.js",
     "test": "node --test test/*.test.js",
-    "check": "npm run test && npm run verify-sim && npm run diagnose-report && npm run model-report && npm run decide-report && npm run orchestrate-report",
+    "check": "npm run test && npm run verify-sim && npm run diagnose-report && npm run model-report && npm run decide-report && npm run orchestrate-report && npm run eval-smoke",
     "diagnose-report": "node src/eval/cli/diagnose-report.js",
     "model-report": "node src/eval/cli/model-report.js",
     "decide-report": "node src/eval/cli/decide-report.js",
     "orchestrate-report": "node src/eval/cli/orchestrate-report.js",
-    "select-arm": "node src/eval/cli/select-arm.js"
+    "select-arm": "node src/eval/cli/select-arm.js",
+    "eval-smoke": "node src/eval/cli/run.js --seeds=1,2 --count=30 --cycles=21 --quiet"
   },
   "comments": {
     "scripts": [

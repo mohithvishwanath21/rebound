@@ -30,6 +30,12 @@
  */
 
 import { rupeesToPaise } from './money.js';
+/**
+ * `timezone.js` imports nothing from here — it takes the window as an argument — so this direction
+ * is the safe one. Reversing it (having timezone.js read GUARDRAILS itself) would make the cycle.
+ */
+import { isWithinHourWindow, wallParts } from './timezone.js';
+
 
 export const COSTS = {
   /**
@@ -242,6 +248,95 @@ export const POLICY = {
   /** Below this diagnosis confidence, treat the cause as UNKNOWN. */
   minDiagnosisConfidence: 0.6,
 };
+
+/**
+ * HOW LONG A MEASURED RUN LASTS, AND WHY THE NUMBER IS ODD.
+ * =========================================================
+ *
+ * Every eval figure in this project is a function of this constant, so it stops being a magic number
+ * at the call site. Two independent constraints fix it, and the second one is the one I got wrong
+ * three times.
+ *
+ * CONSTRAINT 1 — IT MUST COVER THE PHENOMENA BEING MEASURED. Measured on 600-case worlds, natural
+ * self-recovery lands by day ~10.6 at the latest, median 3-4 days. A 3.5-day horizon captured ~55%
+ * of that window, so B0 — the control that exists to prove no arm credits itself with money that
+ * would have arrived anyway — was systematically under-counting the very thing it measures. The
+ * candidate retry offsets also run to 168h (7 days), so at 3.5 days the longest action the policy
+ * can choose never lands at all: a whole column of the action space was unmeasurable. 10 days
+ * captures ~100% of self-recovery and every offset. Past 10 days adds nothing measurable.
+ *
+ * CONSTRAINT 2 — THE RUN MUST NOT END INSIDE QUIET HOURS. Cycle i fires at `startAt + i*stepHours`.
+ * With `startAt` at 09:00 UTC (14:30 IST) and a 12h step, every ODD i lands at 21:00 UTC — which is
+ * 02:30 IST, inside the 21:00-09:00 IST quiet window. A run whose LAST cycle lands there ends with
+ * every contactable case correctly refusing to contact anyone, so the count of cases still in flight
+ * is inflated by an artifact of where the clock stopped rather than by anything a policy did. That
+ * is how a pre-registered threshold of "under 25 of 80 cases still SCHEDULED" came back at 34-38 and
+ * measured the calendar. The last cycle is i = cycles-1, so `cycles` must be ODD for it to land at
+ * 09:00 UTC.
+ *
+ * 21 cycles x 12h therefore: 20 steps = 240h = exactly 10 days, final cycle at 09:00 UTC = 14:30
+ * IST, in business hours. The two constraints are independent and both bind; satisfying one while
+ * violating the other produces numbers that look fine and mean something else.
+ *
+ * WHY A STATE COUNT IS STILL THE WEAKER METRIC. Landing outside quiet hours removes the artifact; it
+ * does not make "cases still in flight" a good measure of policy quality, because a case can be
+ * legitimately mid-sequence at any horizon. Prefer attempt- and money-based metrics, and read a
+ * state count as a diagnostic rather than a result.
+ */
+export const HORIZON = Object.freeze({
+  cycles: 21,
+  stepHours: 12,
+  get days() {
+    return ((this.cycles - 1) * this.stepHours) / 24;
+  },
+});
+
+/**
+ * BOTH HORIZON CONSTRAINTS, CHECKED IN ONE PLACE, AGAINST THE ACTUAL CLOCK.
+ * ------------------------------------------------------------------------
+ * Every command that runs the loop needs to answer the same two questions about the horizon it was
+ * given, and until now each one answered them itself or not at all: `run.js` had its own even/odd
+ * test and `orchestrate-report.js` had no test and an EVEN default of 8, so the Day 7 report was
+ * shipping a run that ended inside quiet hours while the Day 8 report warned about exactly that.
+ * A rule enforced in one command and not the next is not a rule.
+ *
+ * THE EVEN/ODD TEST WAS ALSO ONLY TRUE FOR ONE START INSTANT. "cycles must be ODD" is a consequence
+ * of starting at 09:00 UTC with a 12h step, not a property of horizons. Pass `--now` an odd hour, or
+ * `--step-hours=8`, and the parity test either fires when nothing is wrong or stays silent when the
+ * run really does end at 03:00 IST. So this computes the LAST cycle's instant and asks the same
+ * quiet-hours predicate the guardrail engine asks. The check now follows from the clock instead of
+ * from a remembered special case.
+ *
+ * Returns warnings rather than throwing: a deliberately short debug run is legitimate, and a
+ * command that refuses to run is a command people work around.
+ *
+ * @param startAt   the first cycle's instant; cycle i fires at startAt + i*stepHours
+ * @param guardrails so the quiet window comes from the same config the guardrail enforces, rather
+ *                   than a second copy of 21:00-09:00 that can drift away from it
+ */
+export function describeHorizon({ cycles, stepHours, startAt, guardrails = GUARDRAILS }) {
+  const days = ((cycles - 1) * stepHours) / 24;
+  const lastCycleAt = new Date(new Date(startAt).getTime() + (cycles - 1) * stepHours * 3_600_000);
+  const endsInQuietHours = isWithinHourWindow(lastCycleAt, guardrails.quietHours);
+  const truncated = days < HORIZON.days;
+
+  const warnings = [];
+  if (endsInQuietHours) {
+    const { hour, minute } = wallParts(lastCycleAt, guardrails.quietHours.timezone);
+    warnings.push(
+      `the final cycle (#${cycles}) lands at ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} ` +
+        `${guardrails.quietHours.timezone}, inside quiet hours, so no arm can do contacting work in it — ` +
+        'the count of cases still in flight will be inflated by where the clock stopped'
+    );
+  }
+  if (truncated) {
+    warnings.push(
+      `this run covers ${days} days and the measured horizon is ${HORIZON.days} days — a short horizon ` +
+        'cuts off the arms that SPACE their attempts and so flatters the arm that acts earliest'
+    );
+  }
+  return { days, lastCycleAt, endsInQuietHours, truncated, warnings, isReference: !truncated && !endsInQuietHours };
+}
 
 /**
  * The five policies we compare on Day 8-9.

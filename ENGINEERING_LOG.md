@@ -2549,3 +2549,331 @@ fire before `BUDGET` inside a ten-cycle run. Suite: **463 tests, 463 pass.**
   ones are worth making is a different question from whether they happen.
 
 
+## Day 8 — #57, the five-arm paired comparison, and the two bugs that voided every figure I had
+
+`npm run eval` is the Track 03 headline command: five policies, the same worlds, the same luck, one
+scorer. Five worlds x 80 cases on the held-out TEST split, 21 cycles x 12h = 10 days, ~57s, exit 1 if
+any invariant fails. The command was the easy part. Getting a number out of it that I am willing to
+defend took two fixes, and **both of them had been moving the headline in my favour.**
+
+### Bug one: B3 fired one retry and stalled for nine days
+
+The first full run looked spectacular. Rebound ahead of the honest baseline in 5 of 5 worlds, mean
++Rs 18,183 incremental, pooled 1.81x. I went looking for why B1 and B3 recovered *identical* gross
+money in two of the five seeds, which should not happen between a one-shot retry policy and a
+five-rung ladder.
+
+`probe-ladder.mjs` printed the actions-per-case histogram for B3: `{"1": 65}`. Sixty-five of eighty
+cases received exactly one action across a ten-day horizon, and 55 cases ended terminal in SCHEDULED.
+`probe-b3stall.mjs` dumped every decision for one case and showed the mechanism — eleven decisions,
+each one choosing `RETRY_SCHEDULED` for `now + 24h`:
+
+```
+cycle=1  at=2026-08-24T21:30:00Z  chose RETRY_SCHEDULED for 2026-08-25T21:30:00Z
+cycle=2  at=2026-08-25T09:30:00Z  chose RETRY_SCHEDULED for 2026-08-26T09:30:00Z
+cycle=3  at=2026-08-25T21:30:00Z  chose RETRY_SCHEDULED for 2026-08-26T21:30:00Z
+```
+
+B3 anchored its "+24h" rung to `now`. The orchestrator correctly treats a future `RETRY_SCHEDULED` as
+a wakeup and re-decides when it lands — so every re-decision produced a *fresh* +24h, `retriesUsed`
+never incremented, the rung never advanced, and **zero scheduled retries ever executed.** The ladder
+was a treadmill.
+
+Fixed by anchoring the rungs to the instant the payment actually failed, derived from
+`caseState.ageDays`, and materialising a rung whose due time has passed as a plain `RETRY_NOW`. The
+anchor comes from `ageDays` rather than off the observation deliberately: the guardrail engine ages
+the case by `ageDays`, and a ladder anchored to a different instant than the rules are enforced
+against would drift apart under exactly the conditions nobody tests.
+
+Seed 2 after the fix: 83 -> 296 actions, 51 of 80 cases reaching all five rungs, 50 STOPPED,
+recovery Rs 7,187 -> Rs 14,987. **B3 more than doubled.**
+
+**Why this was the worst kind of bug.** A crippled B3 recovers less, which *inflates* Rebound's
+margin. The headline moved in the flattering direction — the direction that does not prompt anyone to
+look. "Rebound beats the honest baseline in 5 of 5 worlds" was, until this fix, a win over a baseline
+that fired one retry and went to sleep. Re-measured on a working B3: **4 of 5 worlds, mean
++Rs 11,168, pooled 1.38x.** That is the number.
+
+**Why 32 unit tests and 8 mutations missed it.** Every test asked "given this state, what does B3
+choose?" and B3 always chose correctly *for that state*. **No unit test on a single decision can see
+a policy that never advances.** The fix ships with trajectory tests — run the arm for a full horizon
+and assert progression: at least a quarter of cases must get past rung 2, and no arm may leave the
+majority of its cases frozen in OPEN or SCHEDULED. One of them fails against the old code.
+
+This is the sixth time a bug that flattered the headline metric was not found by reading the headline
+metric. The pattern is now explicit in my process: when a result improves, find the mechanism before
+believing the number.
+
+### Bug two: two money columns on two different bases, printed side by side
+
+With B3 working I read the per-world table again and found B1 in seed 5 showing **net Rs 77,454
+beside incremental Rs 49,550**. Net is after costs. It cannot exceed the money it is derived from.
+
+It was not an arithmetic error. `netPaise` was margin-weighted **gross** recovery minus costs, while
+`incrementalPaise` nets out B0's counterfactual. Different bases. They diverge precisely when an arm
+*cannibalises* self-recovery: B1 reached cases first and the world's realised self-recovery collapsed
+from Rs 35,246 under B0 to Rs 1,585. So B1's gross was full of money that was coming anyway, and the
+gross-basis net proudly reported all of it.
+
+Two adjacent money columns on two different bases is a misread waiting to happen, and the larger
+number was the wrong one. Added `netIncrementalPaise`: margin-weighted (agent + self) money, minus
+the margin-weighted counterfactual, minus costs — every rupee weighted at **its own case's** margin
+on both sides of the subtraction, not at an arm-level average. B0 now nets to exactly 0 by
+construction, which is the check that the counterfactual is being subtracted on the basis it was
+measured on.
+
+### And a false claim sitting in a docblock and a test title
+
+While fixing that I re-read `poolAcrossWorlds` and found it asserting that the incremental paired
+difference is "identical to the gross one, because the counterfactual cancels" — with a passing test
+titled the same way. The test passed because its fixture had equal self-recovery on both arms.
+
+The general claim is false. B0 cancels; the self term does not:
+
+```
+incremental(A) - incremental(B) = (rec_A - rec_B) + (self_A - self_B)
+```
+
+Measured on the five-world default: gross mean +Rs 11,398 against incremental mean +Rs 11,168. The
+test is now titled for its precondition and is joined by a hand-computed counterexample where the two
+differences have **opposite signs** — an arm 3 lakh ahead on gross and 2 lakh behind on incremental.
+A comment that tells a reader "you can ignore this column" is worse than no comment.
+
+### What the run reports, and the two columns that are not cross-arm comparable
+
+Both discovered by reading my own first output and finding it misleading.
+
+- **`refused`** counts refused *candidates*, and the arms enumerate wildly different numbers of
+  candidates per cycle — Rebound prices the whole action space, B1 considers one thing. Rebound's 488
+  against B3's 106 would read as "4.6x more restrained" and means nothing of the sort. Its honest use
+  is the zero test: non-zero is evidence the guardrail engine binds on this arm at all. `quiet!`,
+  `cap!` and `ABS!` *are* comparable — they count rules actually broken by actions actually taken.
+- **Horizon truncation flatters Rebound.** My first smoke run at `--cycles=7` had every baseline at
+  exactly Rs 0 and Rebound at Rs 1,222, because 3.5 days cuts off arms that *space* their attempts.
+  The report now prints a HORIZON TRUNCATION block with per-arm `pendingActions` whenever the horizon
+  is short of 10 days. `eval-smoke` cuts worlds and cases to run in 12s and keeps all 21 cycles.
+
+### Measured, five worlds x 80 cases, TEST split, 10 days
+
+Rebound vs **B3_FIXED_LADDER**, the compliant and competently designed baseline:
+
+| | value |
+|---|---|
+| incremental money | mean **+Rs 11,168** |
+| range | **-Rs 14,902 to +Rs 21,727** |
+| sd (n=5) | Rs 15,256 |
+| direction | **ahead in 4 of 5 worlds, behind in 1** |
+| pooled | Rs 2,02,899 vs Rs 1,47,057 = **1.38x** |
+
+Rebound vs **B2_AGGRESSIVE**, the rule-breaker: mean +Rs 2,714, range -Rs 29,831 to +Rs 24,429,
+sd Rs 20,346, ahead in 3 of 5. **The sd dwarfs the mean. That is a tie and I will call it one.**
+
+Compliance, stable across all five worlds: B2 sent **516-571 quiet-hours messages** and **934-1,027
+contact-cap breaches** per world. B1, B3 and Rebound sent **zero of each**. Zero absolute breaches by
+any arm, including B2.
+
+**The claim I am willing to defend:** Rebound *matches* the rule-breaker's money while breaking zero
+rules, and beats the honest baseline in 4 of 5 worlds. That is narrower than 1.81x and 5-of-5, and it
+is the first version of this claim that survives its own invariant checks.
+
+### Verification
+
+556 tests pass. The invariant gate is mutation-tested: forcing `b0RecoveredZero`,
+`allMoneyReconciles` or `noAbsoluteBreaches` false each suppresses the headline and exits 1, against
+a control that prints it and exits 0. `netIncrementalPaise` is mutation-tested five ways — dropping
+the counterfactual, dropping costs, falling back to the gross basis without B0, leaving self money
+unweighted, and loosening the finite-guard to `!== null` — and all five are caught. That last one was
+a real find: `undefined !== null` is true, so a missing figure would have pushed `NaN` into the pool
+and every statistic would have read NaN while `n` still said 5.
+
+`npm run eval-smoke` is wired into `npm run check`.
+
+
+---
+
+## Day 8 — #61, the simulated approver, and the prediction I wrote down before I ran it
+
+### Pre-registered, before a single line of the approver existed
+
+The approval gate freezes real money. Measured across five worlds it holds about 72% of Rebound's
+exposure in `AWAITING_APPROVAL`, roughly 8–9 cases of 80, and until now nothing ever answered those
+requests: the queue was write-only. Every figure in the five-arm table was therefore measured in a
+world with no reviewer in it.
+
+I am writing the prediction here first because the temptation with this change is obvious. Unfreezing
+a queue can only add money, so if I ran it and then wrote up whatever came out, I would be reporting
+a number I chose the direction of in advance. So:
+
+1. **Every arm's recovery rises, not just Rebound's.** `APR_LARGE_AMOUNT` gates all five arms —
+   B1, B2 and B3 queue their high-value charges exactly as Rebound does. If only Rebound improved,
+   that would be a bug in how I wired the approver, not a result.
+2. **Rebound's advantage over B3 widens.** Rebound is gated by four checks (large amount, plus weak
+   and abstained diagnosis) where the baselines are gated by one, so Rebound has the bigger queue and
+   therefore more to gain from having it answered. I expect the mean incremental advantage to rise
+   from **+₹11,168** and the sign count to stay at **4 of 5 or better**.
+3. **`AWAITING_APPROVAL` at the horizon falls from ~8–9 of 80 to 3 or fewer** for Rebound. Anything
+   above that means requests are being raised faster than an 18-hour reviewer can clear them, which
+   would itself be a finding worth reporting.
+4. **Rebound's guardrail violations stay at exactly 0.** A grant clears the named checks it was shown
+   and nothing else. If quiet-hours or contact-cap breaches appear after this change, the grant is
+   being read as a general licence — the precise failure the envelope design exists to prevent, and
+   the thing I most want this measurement to be able to catch.
+5. **Denials are terminal, so ~30% of the queue closes permanently.** This is the reason prediction 2
+   is not a certainty: Rebound's larger queue also eats more permanent refusals.
+
+Where I am least confident: variance. The queued cases are the high-value ones by construction, so
+granting them adds the widest-amount cases to the recovered set. The mean should rise; the standard
+deviation may rise faster, and at n=5 that could leave the advantage less distinguishable from noise
+than it was before. If that happens I will report it as a widening, not as an improvement.
+
+### The result, against the predictions as written
+
+Command: `node src/eval/cli/run.js --seeds=1,2,3,4,5 --count=80 --split=TEST`, 21 cycles x 12h = 10
+days, five worlds of 80 cases on the held-out split. Suite at 605 tests, 0 failures.
+
+**Prediction 1 — every arm improves, not just Rebound. HELD, and the evidence is stronger than the
+prediction.** All four acting arms queue and resolve approvals: B1 asked 4-11 per world, B2 6-23, B3
+4-13, Rebound 12-34. If the approver had been wired to Rebound alone, Rebound's margin over the
+baselines could only have grown. Instead **B2 improved enough to overtake Rebound**, which is the
+opposite of the failure this prediction was written to catch. I would rather have been wrong about the
+ranking than right about it for the wrong reason.
+
+**Prediction 2 — the advantage over B3 widens from +Rs 11,168, sign count stays 4 of 5. HELD, and I am
+reporting it as a widening rather than an improvement, exactly as committed.** Incremental money vs B3:
+mean **+Rs 78,530**, range **-Rs 40,591 to +Rs 3,83,975**, sd **Rs 1,72,568**, n=5, Rebound ahead in
+**4 of 5** worlds. The pre-registered uncertainty was that the sd would rise faster than the mean, and
+it did: the sd is more than twice the mean and the range crosses zero. The pooled ratio of 1.93x is
+carried almost entirely by seed 1, where Rebound takes Rs 4,56,975 against B3's Rs 73,000; drop that
+world and the effect is modest. **The defensible claim is the sign count, not the ratio**, and anyone
+quoting "1.93x" without "4 of 5 worlds, sd larger than the mean, one world negative" is quoting me
+dishonestly.
+
+**Prediction 3 — Rebound's frozen queue falls from ~8-9 of 80 to 3 or fewer. HELD.** Cases still
+AWAITING_APPROVAL at the horizon, per world: **2, 0, 2, 0, 0**. Frozen exposure falls to Rs 54,350 /
+Rs 0 / Rs 2,064 / Rs 0 / Rs 0 against roughly 72% of exposure before the reviewer existed.
+
+**Prediction 4 — Rebound's guardrail violations stay at exactly 0. HELD in all five worlds.** Quiet-hours
+messages 0, contact-cap breaches 0, absolute breaches 0, worst rolling 7-day window **exactly 2 of 2 —
+the cap binds and is never crossed**. The comparison that makes this mean something is B2 in the same
+worlds: 549-578 messages sent inside quiet hours, 966-1040 past the per-customer cap, and a worst
+window of **30 to 45 messages to one customer in seven days against a cap of 2**.
+
+**Prediction 5 — denials are terminal, so a real fraction of the queue closes permanently. HELD.**
+Rebound collected 38 grants against 21 denials across the five worlds, so **35.6% of resolved requests
+were refused**, and the refused exposure runs Rs 30,488 to Rs 2,65,328 per world. That is money the
+policy is permanently barred from by a human decision it does not control, and it is printed beside the
+frozen column precisely so `frozen: 0` cannot be read as "nothing was blocked".
+
+### The thing I did not predict, stated before anything else here gets quoted
+
+**Rebound now LOSES to B2.** Incremental money vs B2: mean **-Rs 42,194**, ahead in only **2 of 5**
+worlds, pooled **0.79x**. Before the reviewer existed this comparison was a tie. Unfreezing the queue
+helped B2 more than it helped Rebound, because B2 queues fewer requests per world and had less of its
+exposure stuck.
+
+I am not going to file that under "B2 cheats so it does not count", because that is the move that would
+make this log worthless. The measured position is: **on money alone, over ten days, on held-out worlds,
+the rule-breaking baseline beats us.** What is also measured, in the same table, is what it costs to be
+B2 — roughly 1,100 messages per world of which about half land inside quiet hours, 30-45 messages to a
+single customer inside one week against a cap of 2, and a message volume that the run's own circuit-breaker
+audit flags as **"YES - production would have truncated this arm"** at 1,155 messages against a production
+cap of 250. So B2's figure is not a number a merchant could actually run; it is the number you get when
+you switch the compliance rules off, and the honest framing of the headline is Rebound against B3.
+
+That framing was already the stated design of the experiment — B3 is named in `compareWithinWorld` as the
+comparison that matters — so this is not a retreat invented after seeing the result. But the B2 column
+moved against us and the pitch must say so out loud rather than let a judge find it.
+
+### Two defects this measurement found, both in code written the same day
+
+**`approvalsReconcile` compared the wrong two quantities, and failed in all five worlds.** The invariant
+asserted that the reviewer's own tally equals the per-case approval census. Rebound's reviewer logged
+**19 grants while only 9 cases ended in GRANTED**, because 7 cases had their authorisation envelope
+expire and returned for a fresh signature, one of them four times. Those are different units: the census
+counts CASES in a final state, the reviewer's log counts DECISIONS, and over ten days one case can
+legitimately collect several. `summariseApprovals` says exactly this in its own docblock about
+`accountsFor` being an inequality, and I wired an equality to the wrong field anyway on the same day.
+Now compared against the audit event counts, `grantedAudits`/`deniedAudits`, which matched 19 to 19.
+Denials were the clue: terminal, so they cannot repeat, and they matched 9 to 9 on both sides while the
+grants disagreed. Three regression tests added, including one asserting the divergence is PERMITTED —
+the assertion that would have prevented the bug.
+
+**The failure message printed one side of a two-sided comparison,** so the run told me the numbers
+disagreed without telling me what disagreed with what, and finding out cost a probe. Both sides are on
+the comparison row now.
+
+**And a reporting drift caught while fixing them:** the INVARIANTS block prints a hand-maintained list
+of passing checks that had not been updated since #62. The run was enforcing nine invariants and
+reporting five. That understates rather than overstates, but the entire point of printing the list is
+that somebody can count it.
+
+### Two more mistakes worth recording, because both were mine and both were caught by a test
+
+`ASSUMPTIONS.approverSlaHours.sweep` was written `[6, 48]` by eye, while `createSimApprover` refuses any
+mean SLA above half of `GUARDRAILS.approvalValidForHours` (36h) — so the declared sweep asked for worlds
+the guard exists to reject, and #58's sensitivity run would have died partway through with a config
+error instead of producing a result. The bound is now **derived** from `approvalValidForHours` rather
+than hardcoded a second time, so the two cannot drift apart, and a test asserts the relationship rather
+than the number.
+
+`test/baselines.test.js` "no arm leaves the majority of its cases frozen" began failing on B2 at 13 of
+24 — and **the test was wrong, not B2**. Measuring the frozen cases instead of relaxing the threshold
+showed only 2 of the 13 had ever touched the approval queue; the other 11 carried **21 actions each**,
+one on every one of the 21 cycles. That is not a stalled policy, it is B2 working as specified: it stops
+only on `ARM_ABSOLUTELY_BLOCKED`, and the fixture itself raises the message and retry caps to 10,000,
+removing the one budget that could ever stop it. The test removed B2's only stopping condition and then
+failed it for not stopping. A terminal state label cannot tell "gave up" from "still working when the
+clock ran out", so the assertion now measures the **mechanism** — unresolved AND fewer than 2 actions
+across ten days, which is the actual stall signature it was written for.
+
+Worth noting the direction: relaxing that threshold to 0.55 would have taken thirty seconds, and a
+baseline that looks like it resolved less makes Rebound's margin look bigger. That is the ninth time on
+this project that a bug pointing the flattering way was invisible from the headline metric.
+
+---
+
+## #51 — the train/serve skew, and what the ground truth says about which side is wrong
+
+Written before the measurement, so the predictions below are pre-registered rather than reconstructed.
+
+Day 7 pinned a skew across three feature columns and deliberately left it open, because the note I
+wrote at the time said there were two coherent designs — delay-explicit features with a delay column,
+or landing-time features with the delay absorbed into age — and that picking between them changes every
+trained model, so it belonged in an eval where money could arbitrate.
+
+Reading the code again, that framing was wrong in a way worth recording. **There was never a choice to
+make, because a third party had already made it: the simulator that generates the labels.**
+`src/sim/responseModel.js` resolves `effectiveAt = max(scheduledFor, now)` and then computes
+`ageDays` from it — line 523, `(effectiveAt - event.occurredAt)`. The label for a nine-day scheduled
+retry is drawn against the case's age *when the retry lands*. So `ageDays` in the feature vector was
+not one of two defensible conventions; it was measuring a different quantity than the label it was
+being fitted against. The model was asked to predict the outcome of an action landing on day 12 from a
+feature saying the case was three days old.
+
+And `delayDays` was not inherently broken either. It is computed as `scheduledFor - context.now`, and
+`decide.js` passed `context.now = guard.effectiveAt` — the landing instant itself. The subtraction was
+correct; it was handed two copies of the same instant. Nothing was wrong with the column. One call site
+was collapsing it.
+
+Both are one fix: a feature vector needs BOTH instants. The decision instant, because the delay is the
+difference between them, and the landing instant, because that is where the physics happen. So
+`buildFeatures` now takes `context.now` as the decision instant only and derives the landing instant
+itself, by importing `effectiveAt` from the guardrail engine rather than restating the
+`max(scheduledFor, now)` rule. Restating it is precisely how the two sides drifted apart the first time.
+
+### Predictions
+
+1. **`delayDays` stops being structurally zero at serving.** Directional and near-certain — it is what
+   the fix does. Recorded so that if it does NOT change, the fix did not land where I think it did.
+2. **The trained model changes and Day 5's figures move.** Every scheduled-retry row's `ageDays`,
+   `ageDecayProxy` and `salaryWindow` shift. I do not predict the direction of calibration.
+3. **Recovered money on TRAIN goes UP, but by less than 10%.** The mechanism is real, but the two age
+   columns already moved in the same direction the delay would have, so I expect substantial
+   redundancy. If money moves more than 10% I have mis-modelled how much the timing columns carry.
+4. **It could go DOWN and that would not falsify the fix.** Correcting a feature to match its label can
+   lower a metric that a leak was flattering — a model fitted on decision-time age was, for scheduled
+   retries, being fed a systematically YOUNGER case than the one it was scored against, i.e. an
+   optimistic view. Losing that is a correction, not a regression. Stated here so I cannot retreat to
+   it only if the number disappoints.
+5. **The prediction most likely to be wrong:** that this is small. I have said "probably redundant"
+   about the timing columns twice now, and the retry-timing defect was not small either time.

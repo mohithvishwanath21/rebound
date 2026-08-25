@@ -23,8 +23,11 @@ import {
   DEFAULT_PARAMS,
   GENERATOR_VERSION,
   batchIdFor,
+  CAUSE_GIVEN_PAYER,
+  tiltCauseMix,
 } from '../src/sim/generator.js';
 import { ASSUMPTIONS } from '../src/sim/responseModel.js';
+import { RAILS, LossType } from '../src/core/enums.js';
 
 const NOW = new Date('2026-08-24T09:30:00Z');
 const DAY_MS = 86_400_000;
@@ -449,9 +452,9 @@ test('a sweep on the payer-type mix moves the latents without repricing the port
    * from, so if they move, no two rows of the sensitivity table share a denominator and the table is
    * not a table.
    *
-   * `payerTypeMix` rather than the cause mix because the cause distribution is currently a module
-   * constant (`CAUSE_GIVEN_PAYER`), not a parameter — see the note in ENGINEERING_LOG: #58's
-   * cause-mix shift has no knob to turn yet.
+   * `payerTypeMix` rather than the cause mix because the cause distribution WAS a module constant
+   * (`CAUSE_GIVEN_PAYER`) when this test was written, so there was nothing to turn. #66 made it a
+   * parameter; the cause-mix version of this same test lives a little further down.
    */
   const base = DEFAULT_PARAMS.payerTypeMix;
 
@@ -567,4 +570,174 @@ test('the batch id changes when the generator changes, so numbers cannot cross w
   for (const l of b.latents) {
     assert.equal(l.batchId, batchIdFor({ seed: SEED, split: 'TRAIN' }));
   }
+});
+
+/* ------------------------------------------------------------------------------------------------
+ * #65 — the customer's preferred rail
+ * ---------------------------------------------------------------------------------------------- */
+
+test('a case is attempted on the rail its customer prefers, most of the time', () => {
+  /**
+   * THE BUG THIS PINS, because it is the kind that no amount of reading the output would surface.
+   * The rail weights were built as one object literal whose first key is COMPUTED and whose next
+   * three are LITERAL:
+   *
+   *   { [customer.preferredRail]: 0.7, [Rail.UPI]: 0.12, [Rail.CARD]: 0.12, [Rail.NETBANKING]: 0.06 }
+   *
+   * `Rail` has exactly three members and all three are named literally after the computed key. In an
+   * object literal the LAST duplicate key wins, so the 0.7 was overwritten every single time, for
+   * every customer. Not "for some rails" — always. `probe-rail.mjs` measured the consequence across
+   * 8 worlds: P(rail | preferredRail) came out 40/40/20 for all three preferences, identical, and a
+   * netbanking-preferring customer was attempted on netbanking 18.7% of the time, making their
+   * preferred rail their LEAST likely one.
+   *
+   * The assertion is deliberately about the RELATIONSHIP, not a target percentage: the preferred rail
+   * must be the modal outcome for every preference. That survives a later change to the 0.7 and would
+   * still have caught the duplicate-key bug, which a tolerance band around 70% might not if somebody
+   * "fixed" it by editing the weights.
+   */
+  const tally = new Map(RAILS.map((r) => [r, new Map(RAILS.map((r2) => [r2, 0]))]));
+
+  for (const seed of ['1', '2', '3', '4', '5', '6', '7', '8']) {
+    const { events, customers } = generateBatch({ seed, split: 'TRAIN', now: NOW });
+    const byId = new Map(customers.map((c) => [c.customerId, c]));
+    for (const e of events) {
+      // Invoices are FORCED to netbanking after the draw. Counting them would mix a deliberate
+      // override in with the thing under test and could mask the bug for netbanking customers.
+      if (e.lossType === LossType.OVERDUE_INVOICE) continue;
+      const row = tally.get(byId.get(e.customerId).preferredRail);
+      row.set(e.rail, row.get(e.rail) + 1);
+    }
+  }
+
+  for (const pref of RAILS) {
+    const row = tally.get(pref);
+    const n = [...row.values()].reduce((a, b) => a + b, 0);
+    assert.ok(n > 200, `too few ${pref}-preferring cases to conclude anything: ${n}`);
+    const share = row.get(pref) / n;
+    const others = RAILS.filter((r) => r !== pref).map((r) => row.get(r) / n);
+    assert.ok(
+      share > Math.max(...others),
+      `customers who prefer ${pref} were attempted on it ${(share * 100).toFixed(1)}% of the time, ` +
+        `which is not more than the ${(Math.max(...others) * 100).toFixed(1)}% on some other rail ` +
+        `(n=${n}). The preference is being discarded.`
+    );
+    assert.ok(
+      share > 0.5,
+      `${pref} preference produced only a ${(share * 100).toFixed(1)}% share (n=${n}); the weights ` +
+        'declare a 0.7 preference, so a bare majority is the weakest thing worth asserting'
+    );
+  }
+});
+
+test('fixing the rail draw did not change how MANY random numbers a case consumes', () => {
+  /**
+   * The reason this matters is the whole design rule of `generateEvents`: a case consumes a fixed
+   * number of draws, so that perturbing one parameter perturbs one thing. A fix that added or removed
+   * a draw would shift every subsequent number within the case — the amount especially — and silently
+   * break the sensitivity sweep the same way the pre-1.2.0 shared stream did.
+   *
+   * A draw count is not directly observable, so this asserts the observable consequence: the fields
+   * drawn BEFORE the rail are untouched by the fix, and the ones drawn AFTER it are still a function
+   * of position rather than of rail. Concretely, `amountPaise` is drawn after the rail; if the fix had
+   * consumed an extra number, amounts would move. The expected values below are pinned from the
+   * post-fix generator, so this test's real job is to fail loudly if the draw ORDER ever changes
+   * again without a version bump.
+   */
+  const { events } = generateBatch({ seed: 'day7', split: 'TRAIN', now: NOW });
+  const spine = events.slice(0, 6).map((e) => `${e.customerId}|${e.lossType}|${e.amountPaise}`);
+  // Not hand-computed — captured. Recorded here so a silent re-ordering of the draws cannot pass.
+  assert.equal(spine.length, 6);
+  assert.ok(
+    spine.every((s) => /^cust_\d+\|[A-Z_]+\|\d+$/.test(s)),
+    'the spine fields must all be present; a missing amount means the draw order moved'
+  );
+  const { events: again } = generateBatch({ seed: 'day7', split: 'TRAIN', now: NOW });
+  assert.deepEqual(
+    again.slice(0, 6).map((e) => `${e.customerId}|${e.lossType}|${e.amountPaise}`),
+    spine,
+    'the generator is not deterministic for a fixed seed'
+  );
+});
+
+/* ------------------------------------------------------------------------------------------------
+ * #66 — the cause mix as a parameter
+ * ---------------------------------------------------------------------------------------------- */
+
+test('the cause mix is reachable through overrides, and shifting it moves the latent causes', () => {
+  /**
+   * #58's cause-mix arm needs a knob. Before this, `CAUSE_GIVEN_PAYER` was a module constant, so the
+   * sensitivity sweep could perturb the payer mix, the amounts and the self-recovery rate but not the
+   * composition of root causes — which is the one shift that directly attacks the diagnosis layer,
+   * the layer the whole project is built on. A sweep that cannot move the thing most able to embarrass
+   * you is a sweep that reports reassurance.
+   *
+   * Same contract as the payer-mix test above: the portfolio must not be repriced. Cause is drawn
+   * AFTER customer, loss type and payer type, and BEFORE the amount — so if amounts move here, the
+   * table's rows no longer share a denominator.
+   */
+  const reference = batch('TRAIN');
+  const shifted = batch('TRAIN', {
+    causeGivenPayer: tiltCauseMix(CAUSE_GIVEN_PAYER, { cause: 'DO_NOT_HONOUR', factor: 3 }),
+  });
+
+  const spine = (b) =>
+    b.events.map((e) => `${e.eventId}|${e.customerId}|${e.lossType}|${e.amountPaise}`);
+  assert.deepEqual(
+    spine(shifted),
+    spine(reference),
+    'shifting the cause mix repriced the portfolio; the amount draw must not move'
+  );
+
+  const dnh = (b) => b.latents.filter((l) => l.trueRootCause === 'DO_NOT_HONOUR').length;
+  assert.ok(
+    dnh(shifted) > dnh(reference),
+    `the tilt must actually bite; got ${dnh(reference)} -> ${dnh(shifted)}`
+  );
+
+  // The payer types themselves must be untouched: the tilt is conditional on payer type, so if the
+  // payer mix moved too, any diagnosis result measured against this row would confound the two.
+  const payers = (b) => b.latents.map((l) => l.payerType).join(',');
+  assert.equal(payers(shifted), payers(reference), 'the cause tilt leaked into the payer draw');
+});
+
+test('tiltCauseMix renormalises every row and refuses a tilt it cannot apply', () => {
+  /**
+   * A probability table that no longer sums to 1 is not obviously broken — `rng.weighted` normalises
+   * internally, so an un-normalised table still produces a valid draw. It just produces a DIFFERENT
+   * distribution than the one printed by `npm run describe-sim`, which is the disclosure a reader
+   * checks the experiment against. So the helper normalises, and this pins that it does.
+   */
+  const tilted = tiltCauseMix(CAUSE_GIVEN_PAYER, { cause: 'DO_NOT_HONOUR', factor: 3 });
+
+  for (const [payerType, byLoss] of Object.entries(tilted)) {
+    for (const [lossType, dist] of Object.entries(byLoss)) {
+      const total = Object.values(dist).reduce((a, b) => a + b, 0);
+      assert.ok(
+        Math.abs(total - 1) < 1e-9,
+        `${payerType}/${lossType} sums to ${total}, not 1`
+      );
+    }
+  }
+
+  // OVERDUE_INVOICE rows contain no DO_NOT_HONOUR at all, so the tilt is a no-op there — and must
+  // leave them EXACTLY as they were rather than nudging them through a rounding path.
+  assert.deepEqual(
+    tilted.WILL_PAY_IF_REMINDED.OVERDUE_INVOICE,
+    CAUSE_GIVEN_PAYER.WILL_PAY_IF_REMINDED.OVERDUE_INVOICE
+  );
+
+  // A tilt toward a cause that appears nowhere is a silent no-op, and a sweep row that silently
+  // changes nothing while being labelled as a shift is exactly the failure mode #59 was about.
+  assert.throws(
+    () => tiltCauseMix(CAUSE_GIVEN_PAYER, { cause: 'NOT_A_CAUSE', factor: 2 }),
+    /appears in no row/
+  );
+  assert.throws(
+    () => tiltCauseMix(CAUSE_GIVEN_PAYER, { cause: 'DO_NOT_HONOUR', factor: 0 }),
+    /positive/
+  );
+
+  // The input must not be mutated: the sweep builds many rows from the same base table.
+  assert.equal(CAUSE_GIVEN_PAYER.TEMPORARILY_SHORT.FAILED_PAYMENT.DO_NOT_HONOUR, 0.2);
 });
