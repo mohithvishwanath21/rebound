@@ -477,11 +477,17 @@ test('the app shell renders before any data has loaded', () => {
   paint('app/pre-load', 'App', {});
 });
 
-/* ─── the drawer, against every case in both runs ──────────────────────────── */
+/* ─── the drawer and the spotlight, against every case in both runs ────────── */
 
 const SEEN = { states: new Set(), outcomes: new Set(), ladders: 0, stamped: 0, receipts: 0, gated: 0, drawn: 0 };
 
-test('every case in both runs opens in the drawer without throwing', async () => {
+/**
+ * Cases with a particular shape, kept as the spotlight tests below need them and refetching every
+ * case a second time would double the slowest test in this file for no new information.
+ */
+const PICKED = { multiDecision: null, stopped: null, gated: null, noActions: null };
+
+test('every case in both runs opens in the drawer AND in the spotlight without throwing', async () => {
   for (const [base, list, tag] of [
     [CONSOLE, cCases.cases, 'console'],
     [MEASURED, mCases.cases, 'measured'],
@@ -496,12 +502,549 @@ test('every case in both runs opens in the drawer without throwing', async () =>
         if ((d.candidates ?? []).length > 0) SEEN.ladders += 1;
         if ((d.candidates ?? []).some((k) => k.chosen)) SEEN.stamped += 1;
       }
+      if (!PICKED.multiDecision && (detail.decisions ?? []).length > 1) PICKED.multiDecision = detail;
+      if (!PICKED.stopped && detail.stop) PICKED.stopped = detail;
+      if (!PICKED.gated && detail.approval) PICKED.gated = detail;
+      if (!PICKED.noActions && (detail.actions ?? []).length === 0) PICKED.noActions = detail;
       paint(`drawer/${tag}/${c.eventId}`, 'Drawer', { detail, onClose: noop });
+      /**
+       * THE SPOTLIGHT IS RENDERED AGAINST EVERY CASE, NOT AGAINST THE ONE ITS LENS HAPPENS TO PICK.
+       *
+       * It takes `detail` as a prop precisely so this is possible: the selection rule lives in
+       * `spotlightPick` and is tested separately, which leaves this loop free to prove that the six
+       * beats survive every case shape the batch can produce — no decision, no action, no gate, no
+       * stop, three decisions, an abstained diagnosis. A hero that renders for the single biggest case
+       * and throws on a stopped one is a hero that blanks the page the moment a judge clicks a lens.
+       */
+      paint(`spotlight/${tag}/${c.eventId}`, 'Spotlight', {
+        detail,
+        pool: list,
+        lensId: 'BIGGEST',
+        setLens: noop,
+        onOpen: noop,
+      });
       SEEN.drawn += 1;
     }
   }
   paint('drawer/null-detail', 'Drawer', { detail: null, onClose: noop });
   assert.ok(SEEN.drawn >= 50, `only ${SEEN.drawn} drawers rendered — the fixture shrank`);
+});
+
+/* ─── the spotlight's selection rule ───────────────────────────────────────── */
+
+/**
+ * THE RULE IS PRINTED ON SCREEN, SO THE CODE THAT PRINTS IT HAS TO ENFORCE IT.
+ *
+ * "Not hand-picked — this is the case with the largest exposure in this batch" is a claim a judge can
+ * check in five seconds against the register below it, and the whole reason the spotlight is more
+ * convincing than a screenshot is that the claim is true. The sort therefore happens locally rather
+ * than being inherited from the server's own ordering: if the API's sort ever changed, a spotlight that
+ * trusted it would keep printing the old sentence over the new case.
+ */
+test('the spotlight picks by its own declared rule, with a total order and no ties', () => {
+  const pick = get('spotlightPick');
+  const rows = [
+    { eventId: 'b', amountPaise: 500 },
+    { eventId: 'a', amountPaise: 900, stopCode: 'STOP_PERMANENT' },
+    { eventId: 'c', amountPaise: 900 },
+    { eventId: 'd', amountPaise: 100, approvalState: 'PENDING' },
+  ];
+
+  const biggest = pick(rows, 'BIGGEST');
+  assert.equal(biggest.chosen.eventId, 'a', 'largest amount wins, and ties break on eventId so it never flickers');
+  assert.equal(biggest.eligible, 4, 'every case is eligible for the exposure lens');
+
+  assert.equal(pick(rows, 'REFUSED').chosen.eventId, 'a', 'only the stopped case may appear under the refusal lens');
+  assert.equal(pick(rows, 'REFUSED').eligible, 1);
+  assert.equal(pick(rows, 'GATED').chosen.eventId, 'd', 'the gated lens ignores amount rank outside its own subset');
+  assert.equal(pick(rows, 'GATED').eligible, 1);
+
+  const flipped = pick([...rows].reverse(), 'BIGGEST');
+  assert.equal(flipped.chosen.eventId, 'a', 'input order cannot change the answer, or the printed rule is a lie');
+
+  assert.equal(pick([], 'REFUSED').chosen, null, 'an empty pool yields no case rather than undefined');
+  assert.equal(pick(null, 'BIGGEST').chosen, null, 'and neither does a pool that has not loaded');
+  assert.equal(pick(rows, 'NOT_A_LENS').lens.id, 'BIGGEST', 'an unknown lens falls back rather than throwing');
+  assert.match(pick(rows, 'BIGGEST').lens.rule, /largest exposure/, 'the rule is a sentence, because it is printed');
+});
+
+test('the spotlight renders under all three lenses, in both modes, on the case each lens picks', async () => {
+  const pick = get('spotlightPick');
+  for (const [base, list, tag] of [
+    [CONSOLE, cCases.cases, 'console'],
+    [MEASURED, mCases.cases, 'measured'],
+  ]) {
+    for (const lensId of ['BIGGEST', 'REFUSED', 'GATED']) {
+      const { chosen, eligible } = pick(list, lensId);
+      if (!chosen) {
+        // No case matches. The panel must say so — proved explicitly in the next test.
+        continue;
+      }
+      const detail = await json(base, `/api/cases/${encodeURIComponent(chosen.eventId)}`);
+      const text = paint(`spotlight/${tag}/${lensId}`, 'Spotlight', {
+        detail,
+        pool: list,
+        lensId,
+        setLens: noop,
+        onOpen: noop,
+      });
+      assert.match(text, /Not hand-picked/, 'the selection rule must be on screen, not in a tooltip');
+      assert.ok(
+        text.includes(String(eligible)),
+        `the lens button must report how many cases matched (${eligible}) so a viewer can see the rule is not "one"`
+      );
+      assert.match(text, /What arrived/, 'beat one is the gateway’s own words and is never optional');
+    }
+  }
+});
+
+/**
+ * An empty panel under a confident heading is how a demo starts lying about what happened. This is the
+ * only test in the file that asserts on the ABSENCE of a case, and it matters most in console mode
+ * where a judge may click a lens before the run has produced anything for it.
+ */
+test('a lens with nothing in it says so, and does not render an empty frame', () => {
+  const empty = paint('spotlight/empty-pool', 'Spotlight', {
+    detail: null,
+    pool: [],
+    lensId: 'REFUSED',
+    setLens: noop,
+    onOpen: noop,
+  });
+  assert.match(empty, /none in this batch/, 'the lens button must report emptiness rather than reading "0 cases"');
+  assert.match(empty, /No case in this batch matches that rule/, 'and the panel must say why it is blank');
+  assert.doesNotMatch(empty, /What arrived/, 'no beat may render without a case behind it');
+
+  const pending = paint('spotlight/pending', 'Spotlight', {
+    detail: null,
+    pool: cCases.cases,
+    lensId: 'BIGGEST',
+    setLens: noop,
+    onOpen: noop,
+    pending: true,
+  });
+  assert.match(pending, /Reading that case/, 'a record still loading is not the same claim as "nothing matches"');
+  assert.doesNotMatch(pending, /No case in this batch matches/, 'and must never be reported as one');
+
+  const truncated = paint('spotlight/truncated', 'Spotlight', {
+    detail: null,
+    pool: cCases.cases,
+    lensId: 'BIGGEST',
+    setLens: noop,
+    onOpen: noop,
+    truncated: 500,
+  });
+  assert.match(truncated, /largest 500 cases/, 'if the pool is capped, the count on screen must be qualified');
+});
+
+/**
+ * THE DEFAULT DECISION IS THE LATEST ONE, AND THIS TEST IS THE REASON IT IS COMPUTED AT RENDER.
+ *
+ * `Drawer` selects its decision in a `useEffect`, which is correct in a browser and invisible here —
+ * effects never fire in this harness, so the drawer tests above assert against decision one while a
+ * real viewer sees the last. The spotlight resolves `pinned === null` to "the latest" during render
+ * instead, which closes that gap: what this assertion checks is what the camera sees.
+ */
+test('the spotlight opens on the latest decision, not the first, and says which it is showing', () => {
+  const detail = PICKED.multiDecision;
+  assert.ok(detail, 'the fixture must contain a case the agent decided on more than once');
+  const decisions = detail.decisions;
+  const last = decisions[decisions.length - 1];
+  const first = decisions[0];
+  assert.notEqual(first.decidedAt, last.decidedAt, 'a multi-decision case must have distinct timestamps');
+
+  const text = paint('spotlight/multi-decision', 'Spotlight', {
+    detail,
+    pool: cCases.cases,
+    lensId: 'BIGGEST',
+    setLens: noop,
+    onOpen: noop,
+  });
+  assert.match(text, /showing the latest/, 'the viewer must be told which of several decisions is on screen');
+  assert.ok(
+    text.includes(`Ranked by expected value at ${get('ist')(last.decidedAt)}`),
+    'the ladder must be the LAST decision’s ladder'
+  );
+  assert.equal(
+    text.includes(`Ranked by expected value at ${get('ist')(first.decidedAt)}`),
+    false,
+    'and not the first, which is the bug this component was written to avoid'
+  );
+});
+
+/**
+ * The refusal lens is the least flattering screen on the page and the most convincing, so the sentence
+ * that carries it is pinned. A stopped case usually dispatched nothing, which means the last beat has
+ * to say "nothing happened" rather than rendering as an absent section.
+ */
+test('a stopped case shows why it stopped, and a case that did nothing says nothing happened', () => {
+  const stopped = PICKED.stopped;
+  assert.ok(stopped, 'the fixture must contain a case the agent chose to stop');
+  const text = paint('spotlight/stopped', 'Spotlight', {
+    detail: stopped,
+    pool: cCases.cases,
+    lensId: 'REFUSED',
+    setLens: noop,
+    onOpen: noop,
+  });
+  assert.match(text, /Why it stopped/, 'stopping is a recorded decision and gets its own beat');
+  assert.match(text, /entitled to close it permanently/i, 'standing is the distinction, and it is spelled out');
+
+  /**
+   * THE LAST BEAT SAYS *WHY* NOTHING HAPPENED, AND THE THREE REASONS ARE NOT INTERCHANGEABLE.
+   *
+   * This assertion used to be a flat `/Nothing was dispatched on this case/`, which passed while the
+   * screen was wrong. The case with no dispatched actions in this batch is AWAITING_APPROVAL, and the
+   * copy underneath it read as though the agent had decided to stop — asserting a decision it had not
+   * made, on the most-read screen in the console. Silence has three causes here: a signature that has
+   * not arrived, a stop the agent chose, and a case simply left alone inside the horizon. Each is
+   * checked on a case actually in that state, so the copy can no longer drift onto the wrong one.
+   */
+  const quiet = PICKED.noActions;
+  assert.ok(quiet, 'the fixture must contain a case on which nothing was ever dispatched');
+  const spot = (label, detail) =>
+    paint(label, 'Spotlight', { detail, pool: cCases.cases, lensId: 'BIGGEST', setLens: noop, onOpen: noop });
+
+  const gatedQuiet = spot('spotlight/no-actions', quiet);
+  assert.match(gatedQuiet, /What actually happened/, 'a quiet case is stated, never omitted');
+  assert.equal(
+    Boolean(quiet.approvalState),
+    true,
+    'this fixture is the awaiting-signature kind of silence — if that changes, the branch below must too'
+  );
+  assert.match(gatedQuiet, /waiting for a signature/, 'the reason for the silence must be the case’s actual reason');
+  assert.match(gatedQuiet, /expires rather than escalating itself/, 'and the gate must be said to fail closed');
+  assert.doesNotMatch(gatedQuiet, /chose to stop/, 'a gated case must never be described as one the agent stopped');
+
+  const bare = { ...quiet, approvalState: null, approval: null, stop: null };
+  const leftAlone = spot('spotlight/no-actions-no-gate', bare);
+  assert.match(leftAlone, /No message, no charge, no rupee/, 'a case left alone says so in plain words');
+  assert.doesNotMatch(leftAlone, /waiting for a signature/);
+
+  const closed = spot('spotlight/no-actions-stopped', {
+    ...bare,
+    stopCode: 'STOP_PERMANENT',
+    stop: {
+      code: 'STOP_PERMANENT',
+      reason: 'no action clears the bar',
+      standing: { allowed: true, blockers: [] },
+      at: '2026-06-01T15:00:00.000Z',
+    },
+  });
+  assert.match(closed, /the correct and cheapest outcome/, 'a stop is the one silence worth being proud of');
+  assert.match(closed, /zero effort rather than as a decision/, 'and the point of saying so is what a count would miss');
+});
+
+/**
+ * THE LADDER IS THE ONLY THING THE SPOTLIGHT SHORTENS, AND THIS IS THE INVARIANT THAT MAKES IT SAFE.
+ *
+ * A full ladder is 23 rungs. The hero shows nine and says how many it left out. The failure mode that
+ * would flatter the demo: the engine does not always pick the top-ranked action — a STOP_PERMANENT is
+ * chosen on standing, not on expected value, and can sit at rank 22 — so a plain `slice` would render a
+ * stopped case with no "chosen" stamp anywhere on it. The screen would look like a tidy ladder rather
+ * than like a decision that went missing, which is exactly the class of defect that survives a demo.
+ */
+test('shortening the ladder can never hide the chosen action, wherever it ranks', () => {
+  const rungs = (n, chosenAt) =>
+    Array.from({ length: n }, (_, i) => ({
+      rank: i + 1,
+      signature: `ACTION_${i + 1}`,
+      priced: true,
+      evPaise: (n - i) * 100,
+      p: 0.1,
+      verdict: 'ALLOW',
+      violations: [],
+      chosen: i === chosenAt,
+    }));
+
+  const at = '2026-06-01T15:00:00.000Z';
+
+  const low = paint('ladder/chosen-last', 'Ladder', {
+    decision: { candidates: rungs(23, 21), outcome: 'STOP_PERMANENT', decidedAt: at, barPaise: 200, chosen: null },
+    limit: 9,
+  });
+  assert.match(low, /action 22/, 'the chosen rung must be present even when it ranks below the cut');
+  assert.match(low, /chosen · STOP PERMANENT/, 'and it must still carry its stamp');
+  assert.match(low, /14 more action/, 'the count of what is not shown must be on screen');
+  assert.match(low, /priced 23 actions/, 'the heading states the true total, not the number shown');
+  assert.equal(low.includes('action 9 '), false, 'the ninth rung is displaced by the chosen one, not added to');
+
+  const high = paint('ladder/chosen-first', 'Ladder', {
+    decision: { candidates: rungs(23, 0), outcome: 'ACT', decidedAt: at, barPaise: 200, chosen: null },
+    limit: 9,
+  });
+  assert.match(high, /action 9 /, 'a top-ranked choice needs no splicing, so nine rungs show');
+  assert.match(high, /chosen · executed/);
+  assert.match(high, /14 more action/);
+
+  const short = paint('ladder/no-truncation', 'Ladder', {
+    decision: { candidates: rungs(4, 0), outcome: 'ACT', decidedAt: at, barPaise: 200, chosen: null },
+    limit: 9,
+  });
+  assert.doesNotMatch(
+    short,
+    /were priced and ranked below these/,
+    'a ladder shorter than the limit must not claim anything was cut'
+  );
+});
+
+/**
+ * A scheduled retry's signature carries an ISO instant, and an ISO instant carries colons. Splitting the
+ * signature on every colon printed `retry scheduled · 2026-06-01t15 · 00 · 00.000z` on the ladder for as
+ * long as the ladder has existed, and no test noticed because no test read the words.
+ */
+test('an action signature with a timestamp in it reads as a time, not as debris', () => {
+  const humanise = get('humanise');
+  assert.equal(humanise('RETRY_SCHEDULED:2026-06-01T15:00:00.000Z'), 'retry scheduled · 01 Jun, 20:30 IST');
+  assert.equal(humanise('SWITCH_RAIL_NUDGE:WHATSAPP'), 'switch rail nudge · whatsapp');
+  assert.equal(humanise('STOP_PERMANENT'), 'stop permanent');
+  assert.equal(humanise(null), '—');
+});
+
+/**
+ * TERSE MODE OMITS EXACTLY ONE SHAPE OF REASON, AND EVERY OTHER SHAPE MUST SURVIVE IT.
+ *
+ * The reasons come from `annotateRejections` in `src/agent/decide.js` and there are five shapes. Four of
+ * them say something the sorted column of figures cannot: not permitted, not yet, below the bar, and a
+ * tie broken deterministically. Only "lost to X by N paise" is redundant with the ordering, and it is
+ * the one that was printing raw paise eight times in the hero. The risk of a rule like this is that it
+ * quietly grows — so all five shapes are asserted here, and the drawer is asserted to print all five
+ * verbatim, including the paise, because the drawer is the record.
+ */
+/**
+ * TWO THINGS A SMALL CASE BREAKS, BOTH FOUND BY READING A ₹147 CARD DECLINE ON THE RENDERED HERO.
+ *
+ * First: the ladder's own heading said "and chose one" on a case where nothing was chosen. A stop on
+ * NEGATIVE_EV leaves `decision.chosen` null and no candidate stamped, so the screen asserted a choice
+ * that the rest of the same screen showed had not been made.
+ *
+ * Second: four rungs whose expected values were 180, 177, 170 and 155 paise all printed "₹2". The
+ * ranking was correct and invisible — a judge sees a ladder ordered by nothing. And `Arithmetic`, whose
+ * note invites the reader to check the subtraction by hand, would have printed "₹2 − ₹0 = ₹1", because
+ * three integers rounded independently do not have to add up. The identity is exact in paise, so at
+ * small scale the whole case is shown in paise.
+ *
+ * Third, and only found by reading the SAME case again after the fix shipped: paise mode did not fire on
+ * it. The fixture below now carries the rung that explains why — `ESCALATE_HUMAN` at −6000 paise, the
+ * cost of a human's time, which a `Math.abs` in the scale calculation promoted into a ₹60 figure and used
+ * to decide the unit for the entire ladder. The unit of the rungs a reader reads was being set by the one
+ * rung they never will. The 23-action real case is why this fixture ends in a large negative: without it
+ * the test passes on code that fails in the browser on the case the feature exists for.
+ */
+test('a small case shows exact paise, and a ladder that chose nothing does not claim it chose', () => {
+  const small = [
+    { rank: 1, signature: 'SWITCH_RAIL_NUDGE:WHATSAPP', evPaise: 180, p: 0.12 },
+    { rank: 2, signature: 'RETRY_SCHEDULED:2026-06-01T15:00:00.000Z', evPaise: 177, p: 0.071 },
+    { rank: 3, signature: 'RETRY_NOW', evPaise: 155, p: 0.066 },
+    { rank: 4, signature: 'NO_ACTION', evPaise: 0, p: 0 },
+    { rank: 5, signature: 'ESCALATE_HUMAN', evPaise: -6000, p: 0.4 },
+  ].map((k) => ({ priced: true, verdict: 'ALLOW', violations: [], chosen: false, ...k }));
+
+  const text = paint('ladder/small-case', 'Ladder', {
+    decision: {
+      candidates: small,
+      outcome: 'STOP_PERMANENT',
+      decidedAt: '2026-06-01T15:00:00.000Z',
+      barPaise: 200,
+      chosen: null,
+    },
+  });
+
+  assert.match(text, /chose none of them/, 'nothing was chosen, so the heading must not say one was');
+  assert.doesNotMatch(text, /and chose one/);
+  for (const k of small) {
+    const shown = k.evPaise < 0 ? `−${Math.abs(k.evPaise)} paise` : `${k.evPaise} paise`;
+    assert.ok(text.includes(shown), `${k.evPaise} must print exactly, as "${shown}"`);
+  }
+  assert.doesNotMatch(text, /₹2\b/, 'four distinct values rounding to one figure is what this fixes');
+  assert.doesNotMatch(text, /₹60\b/, 'the cost of a human must not set the unit for the rungs a reader reads');
+  assert.match(text, /bar to act at all was 200 paise/, 'the bar is in the same unit as the rungs it is compared to');
+  assert.match(text, /under ₹10, so the column is in exact paise/, 'and the screen says why it changed unit');
+  assert.match(text, /5 distinct expected values collapse onto 3/, 'the collision is counted from the rows on screen, not named from a fixture');
+
+  /**
+   * The same ladder above ₹10 must go back to rupees, or this fix has simply replaced one unreadable
+   * unit with another on the cases that carry the money.
+   */
+  const big = paint('ladder/big-case', 'Ladder', {
+    decision: {
+      candidates: small.map((k) => ({ ...k, evPaise: k.evPaise * 10_000 })),
+      outcome: 'ACT',
+      decidedAt: '2026-06-01T15:00:00.000Z',
+      barPaise: 200,
+      chosen: null,
+    },
+  });
+  assert.match(big, /₹18,000/, 'a large case reads in rupees with Indian grouping');
+  assert.doesNotMatch(big, /paise/, 'and says nothing about paise, including the note');
+});
+
+/**
+ * THE SUBTRACTION UNDER "CHECK IT BY HAND" MUST ACTUALLY HOLD BY HAND, AT BOTH SCALES.
+ */
+test('the arithmetic panel prints a subtraction that adds up in whichever unit it chose', () => {
+  const chosen = {
+    grossPaise: 617,
+    totalCostPaise: 437,
+    evPaise: 180,
+    idempotencyKey: 'rebound:evt_x:SWITCH_RAIL_NUDGE:WHATSAPP:0',
+    checksOut: { costsSumToTotal: true, grossMinusCostsIsEv: true },
+    components: {
+      p: 0.12,
+      amountPaise: 14_700,
+      margin: 0.35,
+      channelPaise: 35,
+      humanReviewPaise: 0,
+      expectedFailurePenaltyPaise: 2,
+      patiencePenaltyPaise: 400,
+    },
+  };
+
+  const paise = paint('arithmetic/paise', 'Arithmetic', { chosen, inPaise: true });
+  assert.match(paise, /617 paise − 437 paise = 180 paise/, 'the identity is exact in paise, so print it in paise');
+  assert.match(paise, /35 paise/, 'a 35-paise message cost is not ₹0');
+  assert.match(paise, /identity holds/);
+
+  const rounded = paint('arithmetic/rupees', 'Arithmetic', { chosen, inPaise: false });
+  assert.match(rounded, /₹6 − ₹4 = ₹2/, 'the rupee form is still available for cases where it is honest');
+  assert.doesNotMatch(rounded, /617/, 'the totals do not mix the two units in one line');
+
+  /**
+   * A LARGE CASE STILL HAS SMALL COSTS, AND THAT IS WHERE THE ROUNDED ZERO HID.
+   *
+   * Read off the rendered hero on a ₹2,22,558 receivable: "less channel ₹0", four beats above the agent's
+   * own stored sentence "Cost breakdown: 35 paise message". `inPaise` correctly said this case reads in
+   * rupees — its gross is ₹28,756 — so the case-level unit could never fix a component-level lie. Only
+   * the component that would round to zero drops to paise, and the note says why it did.
+   */
+  const big = {
+    ...chosen,
+    grossPaise: 2_875_600,
+    totalCostPaise: 437,
+    evPaise: 2_875_163,
+    components: { ...chosen.components, amountPaise: 22_255_800, margin: 1 },
+  };
+  const large = paint('arithmetic/large-with-small-costs', 'Arithmetic', { chosen: big, inPaise: false });
+  assert.match(large, /₹28,756 − ₹4 = ₹28,752/, 'the totals are the right unit for a case this size');
+  assert.match(large, /less channel 35 paise/, 'a 35-paise cost that was actually spent must not print as ₹0');
+  assert.match(large, /less expected failure penalty 2 paise/, 'nor a 2-paise one');
+  assert.match(large, /less human review ₹0/, 'a cost of exactly zero is zero in the case unit — only nonzero costs drop');
+  assert.match(large, /less patience penalty ₹4/, 'and a cost above a rupee stays in rupees');
+  assert.match(large, /a real cost shown as ₹0 would be a lie/, 'the mixed unit is explained on screen, not left to be noticed');
+  assert.match(large, /12.0% × ₹2,22,558 × 100.0% =/, 'margin reads as the percentage the audit sentence calls it, not as the bare multiplier 1');
+
+  const noneRounded = paint('arithmetic/no-small-costs', 'Arithmetic', {
+    chosen: { ...big, components: { ...big.components, channelPaise: 0, expectedFailurePenaltyPaise: 0 } },
+    inPaise: false,
+  });
+  assert.doesNotMatch(noneRounded, /would be a lie/, 'a panel with nothing to explain does not explain it');
+  assert.doesNotMatch(
+    noneRounded,
+    /\d+ paise/,
+    'and no row drops unit: the note still says the record is kept in paise, which is true and is the point, but no figure is printed in them'
+  );
+});
+
+test('the hero drops only the reason its own ordering already gives, and the record keeps every one', () => {
+  const shapes = [
+    { rank: 1, signature: 'A', rejectedBecause: 'not permitted — GR_QUIET_HOURS: no contact 21:00–09:00 IST' },
+    { rank: 2, signature: 'B', rejectedBecause: 'not yet — earliest legal moment 2026-06-02T04:00:00.000Z (GR_RETRY_SPACING)' },
+    { rank: 3, signature: 'C', rejectedBecause: 'expected value 187 paise is below the 200 paise bar' },
+    { rank: 4, signature: 'D', rejectedBecause: 'tied with E at 4200 paise; lost the deterministic tiebreak' },
+    { rank: 5, signature: 'E', rejectedBecause: 'lost to SWITCH_RAIL_NUDGE:WHATSAPP by 308687 paise', chosen: false },
+  ].map((k) => ({ priced: true, evPaise: 100, p: 0.1, verdict: 'ALLOW', violations: [], chosen: false, ...k }));
+
+  const decision = { candidates: shapes, outcome: 'ACT', decidedAt: '2026-06-01T15:00:00.000Z', barPaise: 200, chosen: null };
+
+  const hero = paint('ladder/terse', 'Ladder', { decision, limit: 9, terse: true });
+  assert.match(hero, /not permitted — GR_QUIET_HOURS/, 'a guardrail refusal is the whole point of the screen');
+  assert.match(hero, /not yet — earliest legal moment/, 'a defer says something no ordering says');
+  assert.match(hero, /is below the 200 paise bar/, 'the bar comparison keeps its exact paise, because rupees would round it into a contradiction');
+  assert.match(hero, /lost the deterministic tiebreak/, 'a near coin-flip is information a reviewer is entitled to');
+  assert.doesNotMatch(hero, /lost to SWITCH_RAIL_NUDGE/, 'the one redundant reason is the one omitted');
+  assert.doesNotMatch(hero, /308687/, 'and with it the raw paise that made the hero unreadable');
+
+  const record = paint('ladder/verbatim', 'Ladder', { decision });
+  for (const k of shapes) {
+    assert.ok(
+      record.includes(k.rejectedBecause.replace(/\s+/g, ' ')),
+      `the drawer must print every reason verbatim; missing: ${k.rejectedBecause}`
+    );
+  }
+});
+
+/**
+ * A DEFAULT-TIER DIAGNOSIS IS THE WEAKEST MATCH THERE IS, AND THE SCREEN USED TO CALL IT "CONFIDENT".
+ *
+ * `src/agent/diagnose.js` defines DEFAULT as "a rule that matches everything, used only as the invoice
+ * terminal case" — no signal was read — and `src/agent/stopping.js` refuses to close a case permanently
+ * on a diagnosis that weak. The hero printed a green "confident" chip beside it anyway, because the chip
+ * was only ever the negation of `abstained`. The engine's own opinion of the evidence and the screen's
+ * must not disagree, so this checks both ends of the tier scale.
+ */
+test('the diagnosis beat does not claim more confidence than the tier supports', () => {
+  const spot = (label, dx) =>
+    paint(label, 'Spotlight', {
+      detail: { ...PICKED.gated, decisions: [{ ...PICKED.gated.decisions[0], diagnosis: dx }] },
+      pool: cCases.cases,
+      lensId: 'GATED',
+      setLens: noop,
+      onOpen: noop,
+    });
+
+  const base = PICKED.gated.decisions[0].diagnosis;
+  assert.ok(base, 'the fixture must carry a diagnosis to vary');
+
+  const fallback = spot('spotlight/tier-default', { ...base, matchTier: 'DEFAULT', matchedOn: 'default', abstained: false });
+  assert.match(fallback, /by definition, not by inference/, 'a match on nothing is not a confident match');
+  assert.doesNotMatch(fallback, /matched on evidence/);
+  assert.match(fallback, /no decline to diagnose/, 'and the tier explains itself in words a judge can check');
+  assert.doesNotMatch(fallback, /on default/, 'matchedOn adds nothing when the rule is the catch-all');
+
+  const strong = spot('spotlight/tier-reason', {
+    ...base,
+    matchTier: 'REASON',
+    matchedOn: 'international_transaction_not_allowed',
+    abstained: false,
+  });
+  assert.match(strong, /matched on evidence/, 'a reason-code match earns the strong label');
+  assert.match(strong, /machine-readable reason code/, 'and says why that tier is the strongest');
+  assert.match(strong, /international_transaction_not_allowed/, 'the thing it matched on stays on screen');
+
+  const unsure = spot('spotlight/tier-abstained', { ...base, matchTier: 'TEXT', abstained: true });
+  assert.match(unsure, /abstained/, 'abstention outranks the tier label');
+  assert.doesNotMatch(unsure, /matched on evidence/);
+  assert.match(unsure, /brittle/, 'a free-text match is labelled brittle, because the provider can reword it');
+});
+
+test('a gated case shows the envelope, and the beats are numbered without gaps', () => {
+  const gated = PICKED.gated;
+  assert.ok(gated, 'the fixture must contain a gated case');
+  const text = paint('spotlight/gated', 'Spotlight', {
+    detail: gated,
+    pool: cCases.cases,
+    lensId: 'GATED',
+    setLens: noop,
+    onOpen: noop,
+  });
+  assert.match(text, /The gate/, 'the signature envelope is a beat of its own');
+
+  /**
+   * The numerals are the engine's sequence, so they must be contiguous. They were not: the first
+   * version hard-coded 5 and 6 for the gate and the receipts, and a case with no gate printed
+   * 01 02 03 04 06. Numbers that skip read as a missing screen.
+   */
+  const numerals = [...text.matchAll(/\b0(\d)\b/g)].map((m) => Number(m[1]));
+  const beats = [];
+  for (const n of numerals) {
+    if (n === (beats[beats.length - 1] ?? 0) + 1) beats.push(n);
+  }
+  assert.ok(beats.length >= 5, `only ${beats.length} contiguous beats numbered; expected 5+ on a gated case`);
+  assert.deepEqual(
+    beats,
+    beats.map((_, i) => i + 1),
+    `the beat numerals must run 1..n with no gaps, got ${beats.join(',')}`
+  );
 });
 
 /**
@@ -525,6 +1068,27 @@ test('the fixture actually exercised the branches this suite claims to cover', (
     `the queue held only invasiveness ${[...invasiveness].join('/')} — the envelope has two halves and this ` +
       'fixture renders one. Raise the case count until both appear.'
   );
+
+  /**
+   * The spotlight's three lenses are only worth having if the batch can actually fill more than one of
+   * them. If the refusal lens is permanently empty then the most convincing screen on the page is dead
+   * code, and a passing suite would never say so.
+   */
+  const pick = get('spotlightPick');
+  for (const lensId of ['BIGGEST', 'REFUSED', 'GATED']) {
+    assert.ok(
+      pick(cCases.cases, lensId).chosen,
+      `no case in the console batch matches the ${lensId} lens, so that button is permanently disabled`
+    );
+  }
+  for (const [key, why] of [
+    ['multiDecision', 'the latest-decision default is untested'],
+    ['stopped', "the 'why it stopped' beat is untested"],
+    ['gated', 'the gate beat is untested'],
+    ['noActions', "the 'nothing was dispatched' beat is untested"],
+  ]) {
+    assert.ok(PICKED[key], `no case in either batch had shape '${key}', so ${why}`);
+  }
 });
 
 /* ─── the run loop, every exit, with fakes ─────────────────────────────────── */

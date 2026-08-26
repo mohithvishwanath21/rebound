@@ -602,7 +602,7 @@ async function applyNonActingOutcome({ store, runId, decision, at }) {
     });
     await store.appendAudit({
       runId, eventId, type: AuditType.CASE_WAITING, at,
-      detail: { until: iso(until), because: decision.stop?.reason ?? decision.stop?.code ?? 'the policy chose to wait' },
+      detail: { until: iso(until), because: decision.stop?.detail ?? decision.stop?.code ?? 'the policy chose to wait' },
     });
     return;
   }
@@ -653,29 +653,46 @@ async function applyNonActingOutcome({ store, runId, decision, at }) {
       nextActionAt: null,
       'escalation.at': at,
       'escalation.code': decision.stop?.code ?? null,
-      'escalation.reason': decision.stop?.reason ?? null,
+      'escalation.reason': decision.stop?.detail ?? null,
     });
     await store.appendAudit({
       runId, eventId, type: AuditType.CASE_ESCALATED, at,
-      detail: { code: decision.stop?.code ?? null, because: decision.stop?.reason ?? 'routed to a human' },
+      detail: { code: decision.stop?.code ?? null, because: decision.stop?.detail ?? 'routed to a human' },
     });
     return;
   }
 
+  /**
+   * `decision.stop.detail`, NOT `decision.stop.reason` — AND THE DIFFERENCE COST THE AUDIT TRAIL.
+   *
+   * `decide.js` builds the stop as `{ ...disposition.reason, standing, blockedEscalation }`, and
+   * `disposition.reason` is `{ code, detail }`. So the sentence that explains a stop — "best available
+   * recovery action (SWITCH_RAIL_NUDGE) is worth 180 paise, below the 200 paise bar (bar is 1 x sigma
+   * of 151 paise, floored at 200)" — has always lived in `.detail`. Five call sites here and in the read
+   * model asked for `.reason`, a field that has never existed on that object, so every one of them fell
+   * through to its own generic string: every stopped case in every run recorded "nothing available was
+   * worth its cost", every escalation recorded "routed to a human", and the console printed an em-dash.
+   *
+   * Nothing failed. 642 tests were green, because no test read the words and the fallback made every
+   * record look plausible. It surfaced only when the spotlight put the stop on the largest screen in the
+   * console under the note "the least flattering screen here and the one worth the most" — and the
+   * reason field on it was blank. The stopping rules are a judged part of this project; a canned sentence
+   * where the rule's own arithmetic belongs is the worst kind of quiet defect.
+   */
   if (decision.outcome === Outcome.STOP_PERMANENT) {
     await store.patchCase(runId, eventId, {
       state: CaseState.STOPPED,
       nextActionAt: null,
       'stop.at': at,
       'stop.code': decision.stop?.code ?? null,
-      'stop.reason': decision.stop?.reason ?? null,
+      'stop.reason': decision.stop?.detail ?? null,
       'stop.standing': decision.stop?.standing ?? null,
     });
     await store.appendAudit({
       runId, eventId, type: AuditType.CASE_STOPPED, at,
       detail: {
         code: decision.stop?.code ?? null,
-        because: decision.stop?.reason ?? 'nothing available was worth its cost',
+        because: decision.stop?.detail ?? 'nothing available was worth its cost',
         standing: decision.stop?.standing ?? null,
       },
     });

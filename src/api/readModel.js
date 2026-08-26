@@ -238,10 +238,19 @@ export function decisionView(d) {
         }
       : null,
     waitUntil: iso(d.waitUntil),
+    /**
+     * `reason` is sourced from the engine's `detail`, and this rename is the read model earning its
+     * keep rather than a papered-over bug. The decision object carries `{ code, detail }` because that
+     * is what `stopping.js` returns; the API's word for the sentence a human reads is `reason`, and the
+     * case record on the other end of the orchestrator spells it `reason` too. Reading `d.stop.reason`
+     * here — as this did — asks a decision for a field decisions have never had, and it returned null on
+     * every stopped case in the project's history without anything failing. `?? d.stop.reason` stays as
+     * the second choice so a record already shaped the API's way still resolves.
+     */
     stop: d.stop
       ? {
           code: d.stop.code ?? null,
-          reason: d.stop.reason ?? null,
+          reason: d.stop.detail ?? d.stop.reason ?? null,
           standing: d.stop.standing ?? null,
           blockedEscalation: d.stop.blockedEscalation ?? null,
         }

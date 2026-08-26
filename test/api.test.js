@@ -249,6 +249,95 @@ test('a case detail carries the decision, its candidates and its explanation', a
   );
 });
 
+/**
+ * A STOP MUST ARRIVE WITH THE STOPPING RULE'S OWN ARITHMETIC, NOT WITH A CANNED SENTENCE.
+ *
+ * This exists because it did not. `stopping.js` returns `{ code, detail }`, `decide.js` spreads that
+ * onto `decision.stop`, and five consumers — the case patch, the audit entry, the escalation patch, the
+ * wait entry and the read model — all asked for `decision.stop.reason`, a field that never existed on
+ * that object. Every one of them had a fallback, so nothing threw and nothing failed: the audit trail
+ * recorded "nothing available was worth its cost" for every stopped case in every run the project has
+ * ever produced, escalations recorded "routed to a human", and the console printed an em-dash where the
+ * rule's reasoning belonged. 715 tests were green throughout, because no test read the sentence.
+ *
+ * Track 03 asks for stopping rules and an audit trail by name, so this asserts the specific thing that
+ * was missing rather than the shape that was already fine: the reason reaches the API, it reaches the
+ * audit entry, it is the SAME sentence in both, and it is not the fallback.
+ */
+test('a stopped case carries the stopping rule’s own reason, to the API and to the audit trail', async () => {
+  const list = await json(CONSOLE, '/api/cases?state=STOPPED');
+  assert.ok(list.body.cases.length > 0, 'the fixture must stop at least one case for this to mean anything');
+
+  const CANNED = ['nothing available was worth its cost', 'routed to a human', 'the policy chose to wait'];
+  let checked = 0;
+
+  for (const row of list.body.cases) {
+    const { body } = await json(CONSOLE, `/api/cases/${row.eventId}`);
+    if (!body.stop) continue;
+    checked += 1;
+
+    assert.ok(body.stop.code, `${row.eventId}: a stop must name its rule`);
+    assert.ok(
+      typeof body.stop.reason === 'string' && body.stop.reason.length > 12,
+      `${row.eventId}: stop.reason came back ${JSON.stringify(body.stop.reason)} — this is the exact defect: ` +
+        `the sentence lives in the engine's stop.detail and reading .reason silently yields null`
+    );
+    assert.ok(
+      !CANNED.includes(body.stop.reason),
+      `${row.eventId}: stop.reason is the generic fallback, so the rule's own words were lost again`
+    );
+
+    const stopped = body.audit.filter((e) => e.type === 'CASE_STOPPED');
+    assert.equal(stopped.length >= 1, true, `${row.eventId}: a stop is an audited event`);
+    assert.equal(
+      stopped[0].detail?.because,
+      body.stop.reason,
+      `${row.eventId}: the trail and the screen must quote the same sentence, or one of them is decoration`
+    );
+    assert.equal(stopped[0].detail?.code, body.stop.code);
+
+    /**
+     * The DECISION-level stop is a separate mapping in the read model from the CASE-level one, and it
+     * had the same bug independently. The drawer renders the decision; the case header renders the case.
+     * Fixing one and not the other leaves the defect on screen in the other half of the same panel, so
+     * both are asserted here and against each other.
+     */
+    const deciding = body.decisions.filter((d) => d.stop);
+    assert.ok(
+      deciding.length > 0,
+      `${row.eventId}: the case is stopped, so at least one decision must carry the stop that did it`
+    );
+    const last = deciding[deciding.length - 1];
+    assert.ok(
+      typeof last.stop.reason === 'string' && last.stop.reason.length > 12,
+      `${row.eventId}: the decision's own stop.reason is ${JSON.stringify(last.stop.reason)} — the read ` +
+        `model must source it from the engine's stop.detail here too, not only on the case`
+    );
+    assert.equal(last.stop.reason, body.stop.reason, `${row.eventId}: the decision and the case must agree`);
+    assert.equal(last.stop.code, body.stop.code);
+  }
+
+  assert.ok(checked > 0, 'no stopped case carried a stop record, so nothing above was actually asserted');
+
+  /**
+   * One case is checked in detail: NEGATIVE_EV is the stop code whose reason is pure arithmetic, and it
+   * is the one the console puts on its largest screen. If the wording in `stopping.js` changes this
+   * assertion should change with it — that is the point of pinning a substring rather than a shape.
+   */
+  const negative = [];
+  for (const row of list.body.cases) {
+    const { body } = await json(CONSOLE, `/api/cases/${row.eventId}`);
+    if (body.stop?.code === 'NEGATIVE_EV') negative.push(body.stop.reason);
+  }
+  if (negative.length > 0) {
+    assert.match(
+      negative[0],
+      /best available recovery action \(.+\) is worth \d+ paise, below the \d+ paise bar/,
+      'the NEGATIVE_EV reason states the two numbers a reviewer would need to disagree with it'
+    );
+  }
+});
+
 test('the audit trail is newest-first, so a page of it is not a page of cycle 0', async () => {
   const { body } = await json(CONSOLE, '/api/audit?limit=50');
   assert.ok(body.total > 50);

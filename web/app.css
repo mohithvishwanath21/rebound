@@ -186,6 +186,231 @@ a {
   background: var(--panel);
 }
 
+/* ─── the spotlight ─────────────────────────────────────────────────────────────
+ *
+ * The page's first screen and its most important one: one case, narrated in the order the agent
+ * worked. Two decisions worth defending.
+ *
+ * THE TITLE IS SERIF, NOT CONDENSED CAPS. Everything else that shouts on this page — the masthead, the
+ * thesis, every section label — is set in the condensed signage face, so another shouting headline here
+ * would just be louder. A serif line at 44px reads as the heading of a document about a person, which
+ * is what a case is, and it gives the page two voices instead of one at two sizes.
+ *
+ * THE NUMERAL GUTTER IS A SPINE. `.spot-n::after` draws a hairline from each numeral down to the next,
+ * so six beats read as one continuous record rather than six cards that happen to be stacked. It is the
+ * only ornament in here, it costs one pseudo-element, and it encodes something true: the numbers are
+ * the engine's sequence, and the line is the case moving through it.
+ * ──────────────────────────────────────────────────────────────────────────────── */
+
+.spot {
+  padding: 40px 0 10px;
+  border-bottom: 2px solid var(--rule-strong);
+}
+.spot-head {
+  display: flex;
+  gap: 26px;
+  justify-content: space-between;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.spot-title {
+  font-family: var(--prose);
+  font-size: clamp(26px, 4.2vw, 44px);
+  line-height: 1.06;
+  letter-spacing: -0.012em;
+  font-weight: 600;
+  margin: 4px 0 8px;
+  max-width: 28ch;
+}
+.spot-rule {
+  font-style: italic;
+  color: var(--carbon);
+  font-size: 14.5px;
+  margin: 0;
+  max-width: 72ch;
+}
+.spot-trunc {
+  font-family: var(--figure);
+  font-style: normal;
+  font-size: 11.5px;
+}
+.spot-open {
+  font-family: var(--sign);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 11.5px;
+  color: var(--ink);
+  background: none;
+  border: 0;
+  border-bottom: 1px solid currentColor;
+  padding: 0;
+  cursor: pointer;
+  font-style: normal;
+}
+
+/* The declared rules, as three buttons that also report how many cases each rule matches. */
+.spot-lens {
+  display: grid;
+  gap: 6px;
+  min-width: 224px;
+  margin-bottom: 4px;
+}
+.lens {
+  display: grid;
+  text-align: left;
+  gap: 1px;
+  background: var(--panel);
+  border: 1px solid var(--rule-strong);
+  border-radius: 2px;
+  padding: 7px 11px;
+  cursor: pointer;
+}
+.lens-on {
+  border-color: var(--ink);
+  box-shadow: inset 3px 0 0 var(--ink);
+}
+.lens:disabled {
+  cursor: not-allowed;
+  border-style: dashed;
+  opacity: 0.55;
+}
+.lens-label {
+  font-family: var(--sign);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 11.5px;
+  color: var(--ink);
+}
+.lens-on .lens-label {
+  font-weight: 700;
+}
+.lens-count {
+  font-family: var(--figure);
+  font-size: 10.5px;
+  color: var(--carbon);
+}
+
+/* Who, and how much. The amount is a debit: it is money currently lost. */
+.spot-who {
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin: 26px 0 0;
+  padding: 12px 0;
+  border-top: 2px solid var(--ink);
+  border-bottom: 1px solid var(--rule);
+}
+.spot-name {
+  display: block;
+  font-family: var(--sign);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 18px;
+  font-weight: 600;
+}
+.spot-meta {
+  display: block;
+  font-family: var(--figure);
+  font-size: 11.5px;
+  color: var(--carbon);
+  margin-top: 3px;
+}
+.spot-amount {
+  text-align: right;
+}
+.spot-amount-figure {
+  display: block;
+  font-family: var(--figure);
+  font-variant-numeric: tabular-nums;
+  font-size: clamp(24px, 3.4vw, 38px);
+  font-weight: 700;
+  line-height: 1;
+  color: var(--debit);
+}
+.spot-amount-label {
+  display: block;
+  font-family: var(--sign);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 10.5px;
+  color: var(--carbon);
+  margin-top: 4px;
+}
+.spot-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0 0;
+}
+.spot-picker {
+  margin: 22px 0 0;
+}
+
+/* One beat. The numeral column carries the spine. */
+.spot-step {
+  display: grid;
+  grid-template-columns: 2.6em minmax(0, 1fr);
+  gap: 0 16px;
+  padding: 22px 0;
+  border-bottom: 1px solid var(--rule);
+}
+.spot-step:last-child {
+  border-bottom: 0;
+}
+.spot-n {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  font-family: var(--figure);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--carbon);
+  letter-spacing: 0.04em;
+}
+.spot-n::after {
+  content: "";
+  flex: 1;
+  width: 1px;
+  min-height: 10px;
+  margin: 8px 0 0 5px;
+  background: var(--rule-strong);
+}
+.spot-body {
+  min-width: 0;
+}
+.spot-body .sect {
+  padding-bottom: 0;
+}
+.spot-nothing {
+  margin: 0;
+  padding-left: 14px;
+  border-left: 2px solid var(--rule-strong);
+  font-size: 14.5px;
+  max-width: 72ch;
+}
+
+@media (max-width: 720px) {
+  .spot-lens {
+    min-width: 100%;
+  }
+  .spot-step {
+    grid-template-columns: 1.8em minmax(0, 1fr);
+    gap: 0 10px;
+  }
+}
+
+.rung-more {
+  font-family: var(--prose);
+  font-size: 13.5px;
+  color: var(--carbon);
+  margin: 12px 0 0;
+  padding-left: 14px;
+  border-left: 1px solid var(--rule-strong);
+  max-width: 68ch;
+}
+
 /* ─── the thesis (hero) ─────────────────────────────────────────────────────── */
 
 .thesis {
