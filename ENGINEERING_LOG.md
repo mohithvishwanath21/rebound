@@ -3571,6 +3571,51 @@ confidence, and 3 new tests in `test/harness.test.js` for the override guard and
 
 ---
 
+## Day 10 — "the website looks static", and the person saying it was right about the symptom
+
+**Symptom:** Not a stack trace. The console was finished, the render suite was green, and the first
+person to open it in a browser said the page looked static and there was "nothing much" there. That is
+the worst class of bug report to receive and the most valuable, because nothing is failing and the
+product is still not doing its job.
+
+**First hypothesis:** The dashboard was under-built and needed more on it. Wrong, and it would have made
+things worse — the page was not missing components, it was missing *motion*, and adding panels to a
+still page produces a bigger still page.
+
+**Root cause:** There are two modes and the default opens on the wrong one for a human. `--approver=SIM`
+is MEASURED mode: the batch has already run to its horizon before the browser loads, the approval queue
+is empty because a simulated approver already answered everything, and the Advance control deliberately
+**refuses** — moving the clock by hand would truncate the run and invalidate every figure on the page.
+So in the default mode the only thing a visitor could click was a case drawer. `--approver=HUMAN` is
+CONSOLE mode: it pauses mid-horizon holding real pending approvals, prints **no money at all**, and is
+the only mode in which anything moves.
+
+The refusal is not a UI defect. A paused run is a truncated run, biased twice in this project's favour:
+cases still in flight have had less time to fail, and frozen approvals are money the policy never spent.
+So `scoreArm` refuses to score a hand-driven session, and the two claims never share a screen. What was
+actually wrong was that this separation was invisible — the honest design was indistinguishable from a
+dead page.
+
+**Fix:** `runToHorizon` in `web/app.js` (`7eeed5e`, on top of the Day 10 console in `9152664`). A "Run to
+horizon" button walks the remaining cycles one at a time at `RUN_STEP_MS = 220`, with a progress gauge, a
+live state tally read from the server's own `states` count, and a receipt-printer tape of what each cycle
+did. Four exits — horizon reached, refused, interrupted, hard cap — checked in that order, with **Stop
+tested before stepping**, because "I pressed stop and it charged anyway" is the worst sentence a money
+console can produce. The loop sits at module scope rather than inside a `useCallback`: inside a hook no
+test can reach it, and its failure mode is not a blank rectangle but a hung tab and 200 POSTs.
+
+**What it unlocked, which is the actual deliverable:** open in CONSOLE mode, press Run to horizon, and
+sign nothing. The whole batch runs, the gated cases sit in `AWAITING_APPROVAL` permanently, and the page
+says so. *Then* sign one and watch it move. That demonstrates the approval gate is load-bearing rather
+than decorative — which is exactly what the Track 3 bar means by "compliant escalation" — and it is
+motion a viewer can see without a single number being claimed.
+
+**Lesson:** "It works and nobody can see it working" is a real defect with a real cost, and no test in
+this repository could have reported it. Two of the design decisions I was most confident about (refuse to
+advance a measured run; print no money in console mode) were jointly responsible for the page reading as
+dead. Being right about the constraint does not excuse shipping a screen that cannot show the constraint
+being right.
+
 ## Day 11 — 694 green tests all agreed about a Razorpay flag that has never once worked
 
 **Symptom:** The first live run of `npm run recover-live` — the command whose whole purpose is to put
@@ -3647,3 +3692,76 @@ Rebound cannot pay a customer's bill. It can diagnose, price, choose, issue and 
 itself is the customer's act. A recovery product that claimed to close that loop by itself would be
 lying, and the loop we do close is the expensive one — deciding, correctly and cheaply, what to ask
 for.
+
+## Day 12 — I rendered the page and read the words, and found ten defects in a green suite
+
+**Symptom:** None. That is the entry. 715 tests passing, 20 suites, the console working, the Spotlight
+hero built and demonstrably painting. The only reason anything was found is that I stopped asserting
+against the page and started *reading* it: a throwaway script loads `web/app.js` in a `node:vm` with the
+same hook stubs the test harness uses, starts a real `createSession({ count: 40, approver: 'HUMAN' })`
+behind the real API server, fetches real case detail, and prints the extracted text. Then I read the
+text like a judge would.
+
+Ten defects across three sessions, every one while the suite was fully green.
+
+**Why the tests could not have caught them.** The render suite asserts that a component paints and that
+named strings are present. It cannot assert that a *sentence* on screen is true, that two adjacent
+figures are in the same unit, or that a label is not quietly contradicting the audit trail three beats
+below it. `assert.match(text, /Nothing was dispatched on this case/)` passed for days while the copy
+underneath it described a **gated** case — one still waiting on a human — as a case the agent had chosen
+to stop. Both statements were present, the assertion was satisfied, and the page was telling a judge
+something false about the agent's own decision.
+
+**The worst one: a defensive `??` was hiding a field that never existed.** Five consumers read
+`decision.stop?.reason`. `src/agent/stopping.js` returns `{ code, detail }` — there is no `reason`. Every
+one of the five fell through to its own plausible canned string, so **every stopped case in this
+project's history displayed "nothing available was worth its cost"** regardless of why it actually
+stopped, while the real `detail` sat unread in the store. A `TOO_OLD` stop and a `NEGATIVE_EV` stop
+printed the same sentence. The optional-chaining operator and a sensible fallback turned a missing field
+into a confident lie, and nothing failed.
+
+**The unit defect that only a real case could expose.** The ladder decided its display unit with
+`Math.abs` over the expected values, which hands the unit to the largest-magnitude rung — and the
+largest-magnitude rung is usually a heavily negative `ESCALATE_HUMAN` at −6000 paise that nobody reads.
+On a four-rung fixture this was invisible. On the 23-action case the feature was built for it was
+obvious. Three rules came out of it, and they apply to any money-rendering component added from here:
+unit scale is a property of the *case*, not of the field, and is decided on the max of **signed** values
+plus the bar; a cost that was actually spent must never print as ₹0; and a screen that invites
+hand-checking must not imply that three independently rounded integers add up — it must say which
+figures are exact and which are rounded.
+
+**A hard-coded figure in explanatory prose.** The narration said "would print four different values as
+₹2", which was true of the fixture in front of me and would have started lying the first time the data
+moved. Prose now counts its own figures from the rows on screen, over what the reader can actually
+verify, so the sentence cannot drift from the column above it.
+
+**One guard bit me and was right to.** The "browser divides by 100 in exactly one place" test rejected my
+`Math.round(n / 100)`, which would have made it two. Obeying it produced better code: count distinct
+*rendered strings* rather than distinct values, which counts collisions in exactly what the reader saw.
+A blunt guard that bites is doing its job.
+
+**Fix:** `0773311`, plus the Spotlight itself. The hero now narrates one case in the agent's own order of
+operations across six beats — what arrived in the gateway's words, what Rebound made of it and at which
+match tier, the priced ladder with the arithmetic, the agent's own stored `explain` passed through
+untouched, the gate or the stopping rule, and what actually happened (kept as a beat even when the answer
+is nothing). The case is chosen by a rule printed on screen — "Not hand-picked — this is the case with the
+largest exposure in this batch" — with three lenses (largest exposure, where it refused to act, where it
+asked permission), and a lens with no cases says so rather than rendering an empty frame.
+`test/web.test.js` is at 42 tests; the suite is 728/728 across 20 suites.
+
+**One defect I found and deliberately did not fix.** The drawer's ladder prints
+`lost to RETRY_SCHEDULED:2026-06-01T15:00:00.000Z by 35131 paise` — a raw signature and a paise figure
+beside a rupee column, about twenty rows per case. It is ugly. It is also exact, it is generated by
+`annotateRejections` at decision time, and `test/web.test.js` asserts the drawer prints every
+`rejectedBecause` verbatim *because the drawer is the record*. The hero omits this one shape; the drawer
+keeps it. **A screen may omit a stored sentence, but it may never rewrite one** — rewriting an audit
+string for readability is how a screen starts telling a different story from the trail it exists to show.
+If it is ever changed, it gets changed at the generator, never in the view.
+
+**Lesson:** this is the highest-yield technique on the project, and it is embarrassingly low-tech. Assert
+that a component renders, then go read what it rendered — with real cases, not fixtures, because the
+fixtures were built from the same assumptions as the code. Every one of these ten was a case of nothing
+being broken and everything being wrong, which is precisely the class of defect a test suite written by
+the author cannot see. It is the same lesson as Day 11 in a different costume: my own artefacts agree with
+me, so verification has to come from something I did not write — and a page I have to read with my eyes
+is, for this purpose, something I did not write.

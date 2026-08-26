@@ -1807,11 +1807,22 @@ function App() {
   const [pool, setPool] = useState(null);
   const [spot, setSpot] = useState(null);
 
+  /**
+   * The try/catch is not defensive padding. `call` throws on a transport failure and on a non-JSON
+   * body, this runs from an effect that does not attach a `.catch`, and the throw would land before
+   * the `ok` check below — so without it a stopped server turns a case click into an unhandled
+   * rejection and a page that looks frozen for no stated reason. A console that cannot load a record
+   * must say so; silence is the one response an audit surface may not give.
+   */
   const loadDetail = useCallback(async (eventId) => {
     if (!eventId) return setDetail(null);
-    const { ok, body } = await call(`/api/cases/${encodeURIComponent(eventId)}`);
-    if (!ok) return setErr(body.message ?? 'Could not load that case');
-    setDetail(body);
+    try {
+      const { ok, body } = await call(`/api/cases/${encodeURIComponent(eventId)}`);
+      if (!ok) return setErr(body.message ?? 'Could not load that case');
+      setDetail(body);
+    } catch (e) {
+      setErr(e.message);
+    }
   }, []);
 
   const reload = useCallback(
