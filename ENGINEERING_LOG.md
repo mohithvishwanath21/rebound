@@ -3839,3 +3839,48 @@ line existed in a to-do list, and answering properly meant opening the file inst
 Sixteen days of green builds did not surface this; one question did. Which is consistent with everything
 else in this log: **eleven of the defects recorded here flattered the headline number, and not one was
 found by looking at the headline number.**
+
+## Day 13 — the README told a better story than the code did
+
+**Symptom.** None available to any test. Found while re-reading every figure in the write-up against a
+live batch before recording the pitch.
+
+**What it said.** The README's example of the agent declining to act read: *"On a ₹1,442 case in the demo
+batch, all 23 priced actions came out worth less than nothing — chasing cost more than the expected
+return — so it spent nothing and closed the case."*
+
+**What actually happens.** That case (`evt_000010`, lapsed mandate) makes **ten** decisions and dispatches
+**four** WhatsApp nudges before it stops. The value of chasing decays ₹147.26 → ₹130.74 → ₹40.85 → ₹15.12
+→ −₹3.47, and only the last of those is negative. "All 23 came out worth less than nothing" was true of
+the final decision and false of the case.
+
+**Why it mattered more than a typo.** The video script inherited the sentence from the README, and the
+console renders that case's dispatched actions on the same screen the claim would have been made on. The
+failure mode was not a wrong number in a document nobody opens; it was a wrong number that would have been
+contradicted by the screen behind me, out loud, in the five minutes that decide the submission.
+
+**Root cause.** I wrote the sentence from what the stopping rule is *for* rather than from what that case
+*did*. The stop record was in front of me and it is unambiguous — `best available recovery action
+(SWITCH_RAIL_NUDGE) is worth -347 paise, below the 851 paise bar` — but a stop record describes the last
+decision, and I generalised it backwards over the nine before it. Reading the final audit line and
+believing you have read the case is the documentation equivalent of quoting a mean without its variance.
+
+**The fix, and the better story.** Corrected in `aafbe62`. The true version is stronger: it stopped with
+`retriesUsed: 0` of 3 and `touchesUsed: 4` of 5 — it had permission to retry the card three times and send
+one more message, and declined. "It did not run out of permission, it ran out of reasons" is a claim about
+judgment; "it spent nothing" was a claim about a budget, and budgets running out is what every retry loop
+already does. The genuine never-acted case exists and is now named separately: `evt_000007`, ₹147, stopped
+on the first look with all 23 options priced and none taken, best worth ₹1.80 against a ₹2 bar, and at a
+35% contribution margin the whole case was only worth ₹51.
+
+**Not counted among the eleven.** The eleven flattering defects are code defects that moved a measured
+number. This one moved no measurement — it was prose. Worth separating, because conflating them would
+inflate the more interesting claim.
+
+**Lesson.** Every figure in a write-up needs the same provenance rule as every figure in the console: count
+it from the record, do not restate it from the rule that produced it. Two claims failed the check in one
+afternoon and both were recalled rather than counted — this one, and the pitch script's own length, which I
+had written down as 551 spoken words and which measured 835, a minute and a half over a hard limit. Both
+were sentences about things sitting on my disk, checkable in seconds, asserted from memory instead. The
+write-up is the least tested artefact in the repository and it is the only one a judge is guaranteed to
+read.
