@@ -245,8 +245,45 @@ function caseRecordsFor(world, runId) {
      * truth about why it failed lives in `world.latentById` and goes only to the gateway.
      */
     customer: world.customerById.get(event.customerId) ?? null,
-    event,
+    event: storableEvent(event),
   }));
+}
+
+/**
+ * #75 — THE ONE FIELD ON THE EVENT THAT IS NOT OBSERVABLE.
+ *
+ * The generator tags every failure with a flag recording whether it deliberately chose error text
+ * the diagnosis engine cannot match, so `diagnosisAccuracy.js` can report accuracy separately on
+ * the cases designed to be hard. Its comment in `generator.js` has said "stripped before the agent
+ * sees it" since Day 2. Nothing stripped it. The claim was true in effect and false in fact: the
+ * agent genuinely never reads it, because `observe.js` projects events through an allowlist — but
+ * the field was sitting in the store on every case record the whole time.
+ *
+ * That went unnoticed for eight days because the check that exists is a build-time scan for source
+ * files naming the token, and no agent-side source file names it. The generator writes it, the store
+ * copies the event wholesale, and nothing in between had to mention it. The class of defect the scan
+ * cannot see is exactly this one: data arriving somewhere it should not be, with no code saying so.
+ *
+ * It surfaced the moment Day 10 needed to return case records over HTTP, where a judge opening the
+ * network tab would find the answer key sitting on the hard cases and would be entirely right to
+ * stop believing the diagnosis numbers.
+ *
+ * Two fixes, deliberately in different places and failing differently. Here, the event is copied
+ * without the flag, so the store cannot hold what it never received. In `src/api/readModel.js`, the
+ * response is built from an allowlist, so an event that regrows a latent tomorrow still cannot reach
+ * a browser. And `test/api.test.js` scans real HTTP responses for every name on the denylist,
+ * because that is the only one of the three that would have caught this.
+ *
+ * Deleting the field here is safe: `verify.js` and `diagnosisAccuracy.js` read it from
+ * `world.events`, never from a case record.
+ */
+function storableEvent(event) {
+  if (!event?.failure) return event;
+  const failure = { ...event.failure };
+  for (const key of Object.keys(failure)) {
+    if (key.startsWith('_')) delete failure[key];
+  }
+  return { ...event, failure };
 }
 
 /**
@@ -346,6 +383,27 @@ export async function applySelfRecovery({ store, runId, now, world, cycle = 0 })
  *                    decides. NOT where self-recovery lives — that is applied unconditionally below,
  *                    because a world property routed through an optional hook is a world property one
  *                    arm can be run without.
+ * @param pauseAfterCycles
+ *                    stop after this many cycles and return a run that can be continued with
+ *                    `result.advance()`. Null (the default) runs the whole horizon, which is what
+ *                    every eval caller does and what must stay byte-identical.
+ *
+ *                    THIS EXISTS FOR THE LIVE CONSOLE, AND IT IS A HAZARD WORTH NAMING.
+ *
+ *                    The dashboard's approval queue is only interesting if granting something makes the
+ *                    agent do the thing it was holding. That requires a run that has not finished, so
+ *                    the operator's grant lands before a cycle rather than after the last one — which
+ *                    is exactly where the simulated reviewer's grants land in the eval. Same loop, same
+ *                    ordering, stepped by hand.
+ *
+ *                    The hazard is that a PAUSED run is a TRUNCATED run, and a truncated run's money is
+ *                    not comparable with a full-horizon one: cases still in flight have had less time
+ *                    to recover, and cases frozen in the queue are cases the policy never spent money
+ *                    failing on. Both errors point the same way, which is the flattering one. So the
+ *                    money fields below are getters that report what has happened SO FAR, `cyclesRun`
+ *                    is reported beside them, and `src/demo/session.js` refuses to compute an arm
+ *                    comparison at all in the mode that uses this. Nothing here is quotable until the
+ *                    horizon is done.
  */
 export async function runArm({
   world,
@@ -358,6 +416,8 @@ export async function runArm({
   assumptions,
   onCycle,
   beforeCycle,
+  approver: approverOverride,
+  pauseAfterCycles = null,
 }) {
   const { startAt, runId } = world;
   const store = createMemoryStore();
@@ -389,8 +449,30 @@ export async function runArm({
   /**
    * The human on the other side of the approval gate. Seeded from the WORLD, never from the arm, so
    * two arms that queue the same case meet the same reviewer in the same mood — see `approver.js`.
+   *
+   * INJECTABLE, AND THE DEFAULT IS THE ONLY THING THE EVAL MAY USE.
+   *
+   * The dashboard needs a run where nobody answers automatically, because there the operator IS the
+   * reviewer and a simulated one would resolve the queue out from under them. That is a legitimate
+   * second caller, and it is also the single most dangerous parameter in this function: an eval run
+   * that quietly skipped the reviewer would freeze every gated case, and frozen cases are cases the
+   * policy never spends money failing on. It would look like restraint.
+   *
+   * Three things keep that honest rather than hoping I remember. The default is the simulated
+   * reviewer, so silence gets the eval behaviour. An injected approver must actually implement
+   * `resolvePending` or this throws here rather than no-opping later. And the result records
+   * `approverKind`, so a score computed over a run with no reviewer says so in its own output
+   * instead of looking like every other run. `test/harness.test.js` pins all three.
    */
-  const approver = createSimApprover({ seed: world.seed, assumptions: A, guardrails: config.GUARDRAILS });
+  if (approverOverride !== undefined && typeof approverOverride?.resolvePending !== 'function') {
+    throw new TypeError(
+      'runArm: approver must expose resolvePending({ store, runId, now }). ' +
+        'Omit it entirely to get the simulated reviewer the eval uses.'
+    );
+  }
+  const approver =
+    approverOverride ?? createSimApprover({ seed: world.seed, assumptions: A, guardrails: config.GUARDRAILS });
+  const approverKind = approverOverride ? 'EXTERNAL' : 'SIM';
 
   const cycleSummaries = [];
   let recoveredPaise = 0;
@@ -418,8 +500,21 @@ export async function runArm({
    * So `stoppedEarlyAfter` now records when the POLICY fell silent, and the world runs on to the end.
    * The horizon is the instants `startAt + i*stepHours` for i in [0, cycles); a self-recovery falling
    * after the last of those is outside the run and counted for nobody, identically across arms.
+   *
+   * ONE CYCLE, IN A FUNCTION, SO IT CAN BE DRIVEN TWO WAYS.
+   *
+   * The body below is what used to be the body of a `for` loop and is unchanged. It was lifted into a
+   * closure so the live console can step the same code by hand between operator decisions, rather than
+   * a second loop existing somewhere that would drift from this one. `nextCycle` is the only new state:
+   * a cycle index is never re-run and never exceeds `cycles`, so self-recovery — which is drawn per
+   * cycle index — cannot be drawn twice for the same instant or drawn past the horizon.
    */
-  for (let i = 0; i < cycles; i += 1) {
+  let nextCycle = 0;
+
+  async function runOneCycle() {
+    const i = nextCycle;
+    if (i >= cycles) return { ran: false, cycle: i, summary: null };
+    nextCycle += 1;
     clock = new Date(startAt.getTime() + i * stepHours * HOUR_MS);
 
     const self = await applySelfRecovery({ store, runId, now: clock, world, cycle: i });
@@ -441,6 +536,12 @@ export async function runArm({
      * null `nextActionAt`, and the whole design of the envelope is that the agent RE-DECIDES at the
      * current instant; deciding first and granting after would delay every granted case by a full
      * cycle for no reason other than statement order.
+     *
+     * A LIVE OPERATOR'S GRANT LANDS IN THE SAME SLOT. `createHumanApprover` in `src/demo/session.js`
+     * is a `resolvePending` that does nothing, so in console mode this call is a no-op and the grants
+     * that matter were written by `resolveApproval` between two calls to this function — which is the
+     * same instant in the ordering, before the policy re-decides. The console is not a different
+     * lifecycle; it is this one with the reviewer outside the process.
      */
     const answered = await approver.resolvePending({ store, runId, now: clock });
     for (const a of answered.resolved) approvals.push({ ...a, cycle: i });
@@ -450,7 +551,7 @@ export async function runArm({
     const active = await store.getActiveCases(runId);
     if (active.length === 0) {
       if (stoppedEarlyAfter === null) stoppedEarlyAfter = i;
-      continue;
+      return { ran: true, cycle: i, summary: null, activeAtStart: 0 };
     }
 
     const { summary } = await runCycle({
@@ -469,10 +570,24 @@ export async function runArm({
 
     recoveredPaise += summary.recoveredPaise;
     attempts += summary.attempts;
-    cycleSummaries.push({ ...summary, activeAtStart: active.length });
-    if (onCycle) await onCycle({ ...summary, activeAtStart: active.length }, clock);
+    const withActive = { ...summary, activeAtStart: active.length };
+    cycleSummaries.push(withActive);
+    if (onCycle) await onCycle(withActive, clock);
+    return { ran: true, cycle: i, summary: withActive, activeAtStart: active.length };
   }
 
+  const stopAfter = pauseAfterCycles === null ? cycles : Math.min(pauseAfterCycles, cycles);
+  while (nextCycle < stopAfter) await runOneCycle();
+
+  /**
+   * MONEY AND COUNTS ARE GETTERS, NOT VALUES.
+   *
+   * When `pauseAfterCycles` is set, `advance()` keeps mutating the accumulators after this object is
+   * built. Snapshotting them here would hand the console a total frozen at the pause and a store that
+   * kept moving — the two would disagree, silently, in whichever direction the run went. Getters make
+   * every read current by construction. For a full-horizon run they are indistinguishable from the
+   * plain values they replaced, because nothing runs after the loop.
+   */
   return {
     arm,
     store,
@@ -484,17 +599,49 @@ export async function runArm({
      * final case records and asserts the two agree; a disagreement means money was credited with no
      * receipt behind it. Two independent paths is why this figure is worth anything.
      */
-    recoveredPaise,
+    get recoveredPaise() {
+      return recoveredPaise;
+    },
     /**
      * Money that arrived with no action from us. Kept apart from `recoveredPaise` at every level —
      * case field, case state, and here — so that no single careless sum can merge them. The headline
      * Day 8 metric is an arm's `recoveredPaise` measured against B0's on the same world with the same
      * luck; this figure is what makes that subtraction meaningful rather than decorative.
      */
-    selfRecoveredPaise,
-    selfRecoveredCount,
-    attempts,
-    stoppedEarlyAfter,
+    get selfRecoveredPaise() {
+      return selfRecoveredPaise;
+    },
+    get selfRecoveredCount() {
+      return selfRecoveredCount;
+    },
+    get attempts() {
+      return attempts;
+    },
+    get stoppedEarlyAfter() {
+      return stoppedEarlyAfter;
+    },
+    /**
+     * HOW MUCH OF THE HORIZON ACTUALLY RAN. Reported so a partial run cannot pass for a complete one.
+     * `metrics.js` has no business scoring a run where `cyclesRun < horizon.cycles`, and the console
+     * prints both numbers side by side.
+     */
+    get cyclesRun() {
+      return nextCycle;
+    },
+    get paused() {
+      return nextCycle < cycles;
+    },
+    /**
+     * Run the next cycle of this same loop, or report that the horizon is done.
+     *
+     * The point of this being a closure over the loop's own state rather than a second driver is the
+     * clock. `gateway` captured `() => clock` at construction, so a caller who advanced the world by
+     * calling `runCycle` themselves with a fresh `now` would get receipts timestamped at the END of the
+     * paused run while the orchestrator reasoned about the new instant — a train/serve skew of exactly
+     * the kind that has already cost this project two days (#51). Here there is one clock and it is
+     * this one.
+     */
+    advance: () => runOneCycle(),
     /**
      * What the human reviewer did, and how long they took.
      *
@@ -507,27 +654,39 @@ export async function runArm({
      * a request raised at 20:00 with a 4-hour draw shows 4.0 and 13.0. Reporting only the first would
      * understate the gate's real cost; only the second would make the SLA unverifiable.
      */
-    approvals: {
-      slaHours: approver.slaHours,
-      grantRate: approver.grantRate,
-      resolved: approvals,
-      granted: approvals.filter((a) => a.state === 'GRANTED').length,
-      denied: approvals.filter((a) => a.state === 'DENIED').length,
-      grantedPaise: approvals.filter((a) => a.state === 'GRANTED').reduce((s, a) => s + a.amountPaise, 0),
-      deniedPaise: approvals.filter((a) => a.state === 'DENIED').reduce((s, a) => s + a.amountPaise, 0),
-      drawnWaitHoursP50: percentile(approvals.map((a) => a.drawnWaitHours), 50),
-      realisedWaitHoursP50: percentile(approvals.map((a) => a.realisedWaitHours), 50),
-      realisedWaitHoursP90: percentile(approvals.map((a) => a.realisedWaitHours), 90),
-      realisedWaitHoursMax: percentile(approvals.map((a) => a.realisedWaitHours), 100),
+    get approvals() {
+      return {
+        /**
+         * `SIM` means the seeded reviewer in `src/sim/approver.js` answered. `EXTERNAL` means the caller
+         * supplied someone else — in practice a live operator through the dashboard — and every wait
+         * statistic below is therefore about a real clock and not a drawn one. A score carrying
+         * `approverKind: 'EXTERNAL'` is not comparable with the eval and must not be pooled with it.
+         */
+        approverKind,
+        slaHours: approver.slaHours ?? null,
+        grantRate: approver.grantRate ?? null,
+        resolved: approvals,
+        granted: approvals.filter((a) => a.state === 'GRANTED').length,
+        denied: approvals.filter((a) => a.state === 'DENIED').length,
+        grantedPaise: approvals.filter((a) => a.state === 'GRANTED').reduce((s, a) => s + a.amountPaise, 0),
+        deniedPaise: approvals.filter((a) => a.state === 'DENIED').reduce((s, a) => s + a.amountPaise, 0),
+        drawnWaitHoursP50: percentile(approvals.map((a) => a.drawnWaitHours), 50),
+        realisedWaitHoursP50: percentile(approvals.map((a) => a.realisedWaitHours), 50),
+        realisedWaitHoursP90: percentile(approvals.map((a) => a.realisedWaitHours), 90),
+        realisedWaitHoursMax: percentile(approvals.map((a) => a.realisedWaitHours), 100),
+      };
     },
     /**
-     * The horizon the loop ACTUALLY ran, not the one the caller meant to ask for. Reported because
-     * `cycles` above holds one summary per cycle that had work to do — an arm that goes quiet on
-     * cycle 2 reports two summaries out of twenty-one — so `cycles.length` is a measure of policy
-     * behaviour and cannot double as a record of the horizon. Conflating the two is how a truncated
-     * run reads as a complete one.
+     * The horizon the loop was ASKED for, not the one it reached. Reported because `cycles` above holds
+     * one summary per cycle that had work to do — an arm that goes quiet on cycle 2 reports two
+     * summaries out of twenty-one — so `cycles.length` is a measure of policy behaviour and cannot
+     * double as a record of the horizon. Conflating the two is how a truncated run reads as a complete
+     * one. `cyclesRun` above is the third distinct number and the one that says whether this run is
+     * finished.
      */
     horizon: { cycles, stepHours, days: ((cycles - 1) * stepHours) / 24 },
-    endedAt: clock,
+    get endedAt() {
+      return clock;
+    },
   };
 }

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rebound — revenue recovery console</title>
+    <meta
+      name="description"
+      content="An autonomous revenue-recovery agent for Indian payment failures: measured money, compliant escalation, stopping rules, and an audit trail for every decision it did not take."
+    />
+    <!--
+      NO WEBFONTS, NO CDN, NO BUILD STEP.
+
+      This page is served by `node:http` off the local disk on loopback, and the whole project's
+      reproducibility claim is that a reviewer can clone, run one command, and see it. A Google Fonts
+      link would make the typography depend on the reviewer's network at the exact moment they are
+      watching a five-minute pitch; a bundler would make the dashboard the one artefact that needs
+      `npm install` first. So the faces are system faces chosen for what ships on Windows and macOS,
+      and React arrives from web/vendor/ as three UMD files.
+
+      Load order is load-bearing: React defines the global that ReactDOM attaches to, and htm binds
+      React.createElement. Any other order fails with a bare "React is not defined" in the console and
+      a blank page on screen.
+    -->
+    <link rel="stylesheet" href="/app.css" />
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <div id="root">
+      <!--
+        The pre-hydration state is real content, not a spinner. If app.js throws, this is what stays on
+        screen, and it should tell the operator where to look instead of leaving a white rectangle.
+      -->
+      <div class="boot">
+        <p class="boot-mark">REBOUND</p>
+        <p class="boot-line">Loading the run from this server.</p>
+        <p class="boot-note">
+          If this message does not clear, the browser console holds the reason and
+          <code>/api/health</code> will say whether the server itself is up.
+        </p>
+      </div>
+    </div>
+    <script src="/vendor/react.production.min.js"></script>
+    <script src="/vendor/react-dom.production.min.js"></script>
+    <script src="/vendor/htm.umd.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

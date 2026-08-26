@@ -13,7 +13,7 @@
     "verify-sim": "node src/sim/cli/verify.js",
     "live-check": "node src/razorpay/cli/live-check.js",
     "doctor": "node src/razorpay/cli/doctor.js",
-    "api": "node src/api/server.js",
+    "api": "node src/demo/cli/serve.js",
     "eval": "node src/eval/cli/run.js",
     "sweep": "node src/eval/cli/sweep.js",
     "sweep-report": "node src/eval/cli/sweep.js --report-only --out=docs/evidence/sweep-2026-08-26/rows",
@@ -34,12 +34,10 @@
       "`sweep` is not in `check` either, and for a stronger reason than slowness: it runs 26 five-seed five-arm evals and takes about 20 minutes. `sweep-report` re-prints the whole table in under a second from the row JSONs committed under docs/evidence/, so a reader can check every figure quoted in ENGINEERING_LOG.md without spending 20 minutes to reproduce them — and can then spend the 20 minutes if they want to confirm the JSONs are what the code actually produces."
     ],
     "dependencies": [
-      "Deliberately short. `razorpay` was removed once the client was hand-rolled over fetch (see src/razorpay/httpClient.js for the reasoning), and `dotenv` once src/core/env.js replaced it.",
-      "Everything that produces a number in this project — the seeder, the simulator, the eval, the whole test suite — runs on a clean clone with zero installed packages. The two remaining entries are only needed for the API server and the persisted audit trail."
+      "Deliberately empty. `razorpay` was removed once the client was hand-rolled over fetch (see src/razorpay/httpClient.js for the reasoning), `dotenv` once src/core/env.js replaced it, and `express` on Day 10 once the API server was written on node:http (see src/api/server.js for that argument).",
+      "Everything that produces a number in this project — the seeder, the simulator, the eval, the dashboard, the whole test suite — runs on a clean clone with zero installed packages and no network. That property started as an accident of the build environment having no npm registry and turned out to be worth protecting: a reviewer with five minutes will run a command and will not run an install.",
+      "`mongoose` went with them. src/db/store.js speaks a five-method interface and the in-memory implementation is the only one wired; a MONGO store would be a deployment concern, and listing a driver for an adapter that does not exist is a claim the repo cannot honour."
     ]
   },
-  "dependencies": {
-    "express": "^4.19.2",
-    "mongoose": "^8.5.0"
-  }
+  "dependencies": {}
 }

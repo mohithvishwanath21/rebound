@@ -480,6 +480,28 @@ export function summariseApprovals({ cases, audit }) {
 
 export async function scoreArm({ result, world, config = {} }) {
   const { store, runId, arm } = result;
+
+  /**
+   * REFUSE TO SCORE A RUN THAT HAS NOT FINISHED ITS HORIZON.
+   *
+   * `runArm` can now be paused and resumed, because the live console steps the loop between operator
+   * decisions (see `pauseAfterCycles`). A paused run is a truncated run, and truncation biases every
+   * figure below in the same direction: cases still in flight have had less time to recover, and cases
+   * frozen in the approval queue are cases the policy never spent money failing on. Restraint and
+   * interruption look identical in the output.
+   *
+   * So this throws instead of trusting the caller to remember. `cyclesRun` is checked with `!= null`
+   * rather than for truthiness because cycle 0 is a real value.
+   */
+  if (result.cyclesRun != null && result.cyclesRun < result.horizon.cycles) {
+    throw new Error(
+      `scoreArm: ${arm} ran ${result.cyclesRun} of ${result.horizon.cycles} cycles and is still paused. ` +
+        'A truncated run cannot be scored: unfinished cases have had less time to recover and frozen ' +
+        'approvals are money the policy never spent, so every figure would be biased in the flattering ' +
+        'direction. Finish the horizon with result.advance() first, or do not score this run.'
+    );
+  }
+
   const cases = await store.getCases(runId);
 
   /**
