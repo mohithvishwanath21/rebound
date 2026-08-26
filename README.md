@@ -88,7 +88,7 @@ Zero dependencies, no build step, no network required — React and htm are comm
 
 | Command | What it does |
 | --- | --- |
-| `npm test` | 728 tests, 20 suites, ~50s |
+| `npm test` | 729 tests, 20 suites, ~50s |
 | `npm run eval` | the five-arm paired comparison — this is where the money figures come from |
 | `npm run sweep-report` | the 26-world assumption sensitivity sweep |
 | `npm run api -- --count=40 --approver=HUMAN` | the operator console on `localhost:8787`; you are the approver |

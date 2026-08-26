@@ -23,6 +23,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { GROUND_TRUTH_TOKENS } from '../src/core/groundTruthTokens.js';
 
 /**
  * `fileURLToPath`, NOT `new URL(...).pathname`.
@@ -51,8 +52,8 @@ const SRC = fileURLToPath(new URL('../src/', import.meta.url));
  */
 const RESTRICTED = ['agent', 'api', 'razorpay', 'ml'];
 
-/** Tokens that indicate a read of simulator ground truth. */
-const FORBIDDEN_TOKENS = [
+/** The annotated history of why each token is on the register. Pinned as a subset below. */
+const LOCAL_TOKENS = [
   'latent_truth',     // the collection name
   'LatentTruth',      // the mongoose model
   'latentTruth',      // the module
@@ -83,6 +84,44 @@ const FORBIDDEN_TOKENS = [
   '_generatedVague',
   'trueCause',
 ];
+
+/**
+ * WHY THE SCAN NOW RUNS OVER THE SHARED REGISTER AND NOT THE LIST ABOVE.
+ *
+ * Day 10 gave this denylist a second consumer: the dashboard serves case records over HTTP, and the
+ * store's records carry `event.failure._generatedVague`, which a build-time scan of agent source can
+ * never catch — no agent file names the field, the generator writes it and the store copies the event
+ * wholesale. So `test/api.test.js` grew a runtime check over real HTTP responses, reading
+ * `GROUND_TRUTH_TOKENS` from `src/core/groundTruthTokens.js`. That file's own header warned what
+ * happens next: "two checks reading two copies of a denylist is a bug waiting for one of them to be
+ * updated alone."
+ *
+ * It happened. `selfRecoverAt` — the instant an untouched case would have paid on its own, and the
+ * single most valuable field in the world model, because an agent reading it would skip precisely the
+ * cases needing no help and post a recovery rate nothing could reproduce — was added to the shared
+ * register on Day 10 for the runtime check and never reached the list above. For 16 days the
+ * build-time scan would not have flagged agent code reading it. Nothing was reading it, so no number
+ * in this project is affected; the guard was simply narrower than it advertised, which is the failure
+ * mode a guard is least likely to report about itself.
+ *
+ * The scan therefore reads the shared register. `LOCAL_TOKENS` is retained only as the annotated
+ * history of why each entry exists — the reasoning is worth keeping — and the assertion below pins it
+ * as a subset, so the two can never disagree about a token again while the register stays free to grow.
+ */
+const FORBIDDEN_TOKENS = GROUND_TRUTH_TOKENS;
+
+test('the denylist has one source of truth, and the annotated history has not drifted from it', () => {
+  const drifted = LOCAL_TOKENS.filter((t) => !GROUND_TRUTH_TOKENS.includes(t));
+  assert.deepEqual(
+    drifted,
+    [],
+    `tokens documented here but absent from the shared register: ${drifted.join(', ')}`
+  );
+  assert.ok(
+    GROUND_TRUTH_TOKENS.includes('selfRecoverAt'),
+    'selfRecoverAt is the highest-value latent in the world model and must be on the register'
+  );
+});
 
 function walk(dir) {
   if (!existsSync(dir)) return [];
