@@ -113,13 +113,43 @@ test('[LIVE_TEST] links never accept partial payment, so a recovery is all-or-no
   assert.equal(fake.linkByReference(r.reference).accept_partial, false);
 });
 
-test('[LIVE_TEST] a rail nudge asks for a UPI-only link, which is the mechanism it is betting on', async () => {
+test('[LIVE_TEST] a rail nudge does NOT ask for a UPI-only link, and says on the receipt why not', async () => {
+  /**
+   * This test used to assert the opposite, and the assertion was wrong for as long as it existed.
+   *
+   * A UPI-only link is fewer taps than a card checkout, which is the mechanism SWITCH_RAIL_NUDGE
+   * bets on, so the gateway set `upi_link: true` on every rail nudge and this test confirmed it.
+   * Razorpay refuses the flag in test mode — "UPI Payment Links is not supported in Test Mode" —
+   * first seen live on 2026-08-26. The live gateway is test mode by construction, since
+   * `createRazorpayClient` rejects any `rzp_live_` key, so every rail nudge through it was a
+   * guaranteed 400 and the suite could not see it: the fake accepted the flag because I had told
+   * it to.
+   *
+   * The caveat is the point of the new assertion. Dropping the flag silently would leave a link
+   * that quietly accepts cards while the receipt claimed a rail switch; the caveat records that
+   * the restriction was intended, is unavailable, and that UPI is still among the methods offered.
+   */
   const { gw, fake } = liveWithFake();
   const r = await gw.sendPaymentLink(
     requestFor({ action: { kind: ActionKind.SWITCH_RAIL_NUDGE, channel: 'SMS' }, preferredRail: 'UPI' })
   );
-  assert.equal(fake.linkByReference(r.reference).upi_link, true);
-  assert.ok(r.caveats.some((c) => /upi_link/i.test(c)));
+  assert.equal(fake.linkByReference(r.reference).upi_link, false, 'the flag cannot be sent in test mode');
+  assert.ok(
+    r.caveats.some((c) => /upi_link/i.test(c) && /live mode only/i.test(c)),
+    `the receipt must record why the restriction is absent, got: ${JSON.stringify(r.caveats)}`
+  );
+});
+
+test('[LIVE_TEST] the fake refuses upi_link exactly as Razorpay does, so the flag cannot come back', async () => {
+  const { fake } = liveWithFake();
+  const res = await fake.fetchImpl('https://api.razorpay.com/v1/payment_links', {
+    method: 'POST',
+    headers: {},
+    body: JSON.stringify({ amount: 49900, currency: 'INR', reference_id: 'rbd_upi_probe', upi_link: true }),
+  });
+  assert.equal(res.status, 400);
+  const body = JSON.parse(await res.text());
+  assert.match(body.error.description, /not supported in Test Mode/);
 });
 
 test('[LIVE_TEST] expiry is floored at 15 minutes, which is Razorpay’s own minimum', async () => {

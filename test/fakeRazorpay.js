@@ -95,8 +95,28 @@ export function createFakeRazorpay({ now = () => new Date() } = {}) {
         )
       );
     }
-    if (body.upi_link && body.accept_partial) {
-      return json(400, errorBody('BAD_REQUEST_ERROR', 'upi_link cannot be used with accept_partial'));
+    /**
+     * CONFIRMED AGAINST THE REAL API ON 2026-08-26, and it replaces a belief this fake held.
+     *
+     * `upi_link: true` is refused outright in test mode. The fake used to accept it, which is
+     * why `src/razorpay/liveGateway.js` shipped setting the flag on every SWITCH_RAIL_NUDGE —
+     * a guaranteed 400 on a code path the whole suite thought it had covered. This is the
+     * failure mode a fake has by construction: it encodes my beliefs, so it can only confirm
+     * them. The error string below is Razorpay's, copied from the live 400.
+     *
+     * Razorpay also refuses `upi_link` combined with `accept_partial`, and this fake used to model
+     * that too. That branch is now UNREACHABLE — the flag is rejected before the combination can be
+     * evaluated — so it is deleted rather than left sitting there implying coverage of a rule no
+     * test can ever reach. If this project ever runs in live mode the rule comes back.
+     */
+    if (body.upi_link) {
+      return json(
+        400,
+        errorBody(
+          'BAD_REQUEST_ERROR',
+          'UPI Payment Links is not supported in Test Mode. Please experience the product in Live Mode.'
+        )
+      );
     }
     if (body.expire_by && body.expire_by < unix() + 15 * 60) {
       return json(400, errorBody('BAD_REQUEST_ERROR', 'expire_by should be at least 15 minutes from now', { field: 'expire_by' }));
@@ -131,8 +151,17 @@ export function createFakeRazorpay({ now = () => new Date() } = {}) {
     return json(200, link);
   }
 
-  /** Simulate a human paying a link with a test card. Used by the reconciliation tests. */
-  function payLink(linkId, { amountPaise } = {}) {
+  /**
+   * Simulate a human paying a link with a test instrument. Used by the reconciliation tests.
+   *
+   * `method` used to be derived as `link.upi_link ? 'upi' : 'card'`. That derivation died with the
+   * 2026-08-26 finding that test mode refuses `upi_link` altogether: every link is now
+   * unrestricted, so the flag can no longer stand in for what the payer chose. Which rail a human
+   * picks on an unrestricted link is the payer's decision and nothing on the entity records it in
+   * advance, so the caller has to say. Default 'upi' because that is the rail the recovery demo
+   * asks for; the real 2026-08-22 recovery came in on netbanking, and both are legal answers.
+   */
+  function payLink(linkId, { amountPaise, method = 'upi' } = {}) {
     const link = links.get(linkId);
     if (!link) throw new Error(`fake: no such link ${linkId}`);
     const paid = amountPaise ?? link.amount;
@@ -142,7 +171,7 @@ export function createFakeRazorpay({ now = () => new Date() } = {}) {
       amount: paid,
       currency: 'INR',
       status: 'captured',
-      method: link.upi_link ? 'upi' : 'card',
+      method,
       order_id: nextId('order'),
       notes: { ...link.notes },
       created_at: unix(),

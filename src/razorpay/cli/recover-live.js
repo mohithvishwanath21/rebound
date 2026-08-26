@@ -599,7 +599,36 @@ export async function main({ argv = process.argv.slice(2), fetchImpl, sleep, evi
   reel.kv('link', plink ?? '—', bold);
   if (url) reel.kv('url', url, bold);
   reel.kv('amount', rupees(amountPaise));
-  reel.kv('restricted', 'upi_link=true — this link can only be paid on UPI');
+  /**
+   * DELIBERATELY NOT "UPI, netbanking, wallet, card". Nothing on the payment-link entity says which
+   * methods this account has enabled, so listing them would be me narrating a configuration I never
+   * read. What I can say is verified from both ends: the link carries no restriction, and a real
+   * recovery on this account arrived on netbanking on 2026-08-22.
+   */
+  reel.kv('methods', 'unrestricted — the payer chooses; the 22 Aug recovery arrived on netbanking');
+
+  /**
+   * THIS BEAT USED TO CLAIM `upi_link=true — this link can only be paid on UPI`, AND THE CLAIM WAS
+   * FALSE FOR AS LONG AS IT EXISTED. Razorpay refuses the flag in test mode. The caveat below is
+   * read off the receipt rather than typed here, so if the gateway ever stops recording it this
+   * line disappears from the video instead of turning back into a lie.
+   */
+  const railCaveat = (receipt?.caveats ?? []).find((c) => /upi_link/i.test(c)) ?? null;
+  if (railCaveat) {
+    reel.kv('caveat', 'upi_link requested, NOT applied', yellow);
+    reel.note(railCaveat);
+    reel.note(
+      'Worth pausing on, because it is the most useful thing that has gone wrong on this project. A ' +
+        'UPI-only link saves the customer a tap, so the gateway set that flag on every rail nudge and ' +
+        'the whole test suite agreed it worked — the fake I test against accepted the flag because I am ' +
+        'the one who wrote the fake. The real API returns "UPI Payment Links is not supported in Test ' +
+        'Mode", and this account is test mode by construction, so that code path had never once worked. ' +
+        'A fake encodes my own beliefs, which is precisely why it cannot falsify them; only a live call ' +
+        'could. The decision itself is untouched: the declined card cannot be authorised at all, and ' +
+        'this link puts no method restriction in the payer\'s way. What is lost is one tap, and what ' +
+        'is gained is a receipt that says so.'
+    );
+  }
   reel.kv('notify', 'sms=false email=false reminder_enable=false');
   reel.note(
     'No message was sent to anybody. Razorpay would happily notify and re-remind on its own schedule, ' +

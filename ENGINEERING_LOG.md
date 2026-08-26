@@ -3568,3 +3568,68 @@ cause mix does.
 Suite at **642 tests, 0 failures, 20 suites**, including 18 new tests in
 `test/perturbations.test.js` whose entire purpose is that a silent no-op in a sweep row manufactures
 confidence, and 3 new tests in `test/harness.test.js` for the override guard and its one named opt-out.
+
+---
+
+## Day 11 — 694 green tests all agreed about a Razorpay flag that has never once worked
+
+**Symptom:** The first live run of `npm run recover-live` — the command whose whole purpose is to put
+one real decline through the agent and out the other side as real money, so the pitch video does not
+open on a simulation. Beats 1, 2 and 3 ran clean against api.razorpay.com on the first attempt: a real
+₹499 payment from 22 August, `error_reason international_transaction_not_allowed`, diagnosed
+`INSTRUMENT_NOT_ACCEPTED` at REASON tier, retry priced at `EV = −₹2`, and the rail switch quoted at
+`p > 1.35%`. Then beat 4, the one that actually asks Razorpay to do something:
+
+    -> POST /payment_links 400 (1056ms)
+    RazorpayValidationError: Razorpay 400 BAD_REQUEST_ERROR: UPI Payment Links is not supported
+    in Test Mode. Please experience the product in Live Mode.
+
+**First hypothesis:** A bug in the new CLI — it is a day old, and everything around it has been stable
+for a week. Wrong, and wrong in a way worth recording: the CLI was passing `preferredRail: 'UPI'`,
+which is correct, into a gateway that had been converting that into `upi_link: true` on every
+`SWITCH_RAIL_NUDGE` since Day 3. The new command was the first thing that had ever executed that
+branch against the real API.
+
+**Root cause:** `upi_link` is a live-mode-only product. And `createRazorpayClient` hard-stops on any
+key beginning `rzp_live_`, deliberately, so this gateway is test mode *by construction*. Put those two
+facts together: **every rail nudge through the live gateway was a guaranteed 400, and had been for
+eight days.** The single most important action in the whole action set, on the only code path that
+touches a real payment provider, could not succeed even once.
+
+The reason 694 tests did not notice is the part I care about. `test/gateway.test.js` had a test named
+"a rail nudge asks for a UPI-only link, which is the mechanism it is betting on", and it passed, and it
+was asserting against `test/fakeRazorpay.js` — which accepted the flag, because I wrote the fake and I
+believed the flag worked. The test, the fake and the gateway were three expressions of one belief, so
+they agreed with each other perfectly and the agreement felt like coverage. **A fake encodes my
+beliefs, which is exactly why it cannot falsify them.** The fake's own header has said so since Day 3;
+it turns out writing the caveat down does not exempt you from it.
+
+**Fix:** In the gateway, not in the CLI, because it is a provider-capability fact every caller needs.
+The flag is gone from the request body, and `UPI_LINK_TEST_MODE_CAVEAT` is attached to every rail-nudge
+receipt so a reviewer sees that the restriction was *intended* and why it is absent — a silently
+unrestricted link that the narration calls a rail switch would be a worse outcome than the 400 was. The
+fake now returns Razorpay's exact 400 for the flag, so re-adding it fails offline. Its
+`upi_link && accept_partial` branch was deleted rather than left in place, since it is now unreachable
+and unreachable code implies coverage of a rule no test can reach. `payLink(id, { method })` takes the
+method explicitly, because `link.upi_link ? 'upi' : 'card'` was inferring the payer's choice from a
+flag that no longer exists. Two test titles were inverted to assert the opposite of what they used to.
+Suite 714 → 715, 0 failures.
+
+**What is actually lost:** one tap. An unrestricted link carries no method restriction, so the payer
+still chooses a rail that is not the card that just failed, which is the nudge's whole claim. While
+correcting the CLI's beat-4 output I also caught myself writing `methods: UPI, netbanking, wallet,
+card — every method this account accepts` as the replacement line. Nothing on the link entity reports
+which methods an account has enabled. That would have been a second unverified claim installed while
+fixing the first one, so the line now reads `unrestricted — the payer chooses; the 22 Aug recovery
+arrived on netbanking`, which is two things I have observed.
+
+**Lesson:** The tests I trust least should be the ones asserting against my own fake, and the ranking
+of which code paths are riskiest is not "how new is it" but "how many times has it been executed by
+something I do not control". Eight days of green on a path with zero real executions is zero evidence.
+There is now one item on the pre-video checklist that no test can discharge: every gateway branch must
+have been run once, live, against a key I did not write.
+
+This is also the answer to the form's last question, and it is a better answer than the one I had. The
+form asks what broke and how I got out, and says it is the one they read first. "A capability my fake
+confirmed and the provider refused, on the only path that touches real money" is a more useful thing to
+have found than anything I would have found by reading my own code again.

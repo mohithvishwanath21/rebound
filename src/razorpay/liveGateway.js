@@ -28,6 +28,31 @@
  *      network died mid-request we look the reference up; only if Razorpay has no record
  *      of it do we return `UNKNOWN`, and even then we never return FAILED, because
  *      "FAILED" would invite a retry that could double up.
+ *
+ *   4. `upi_link: true` CANNOT BE USED AT ALL, and this is the correction that hurt most.
+ *      A UPI-only payment link is genuinely fewer taps than a card checkout, which is the
+ *      whole mechanism SWITCH_RAIL_NUDGE bets on, so this gateway set the flag whenever the
+ *      action was a rail nudge. Razorpay's reply, first seen on 2026-08-26:
+ *
+ *          400 BAD_REQUEST_ERROR
+ *          "UPI Payment Links is not supported in Test Mode. Please experience the product
+ *           in Live Mode."
+ *
+ *      It is a live-mode-only product. Since `createRazorpayClient` refuses any key that
+ *      begins `rzp_live_`, this gateway is test mode by construction, which means the flag
+ *      could NEVER have worked here — every SWITCH_RAIL_NUDGE through the live gateway was a
+ *      guaranteed 400, and nothing caught it because `test/fakeRazorpay.js` accepted the flag
+ *      happily. A fake encodes my beliefs, so it cannot falsify them; only the live run did.
+ *      The fake now returns this exact error, so re-adding the flag fails in the suite.
+ *
+ *      What is lost is smaller than it looks. A standard link carries no method restriction at
+ *      all, so it offers whatever this account has enabled, and the nudge's actual claim — "come
+ *      and pay on a rail that is not the card that just failed" — is intact; what is gone is the
+ *      tap saved by pre-selecting UPI. The receipt carries `UPI_LINK_TEST_MODE_CAVEAT` so a
+ *      reviewer can see that the restriction was intended and why it is absent, rather than
+ *      finding a silently unrestricted link. Note what this does NOT claim: nothing on the link
+ *      entity reports which methods the account has enabled, so neither the caveat nor the CLI
+ *      lists them.
  */
 
 import { createRazorpayClient } from './httpClient.js';
@@ -47,6 +72,17 @@ import { RazorpayDuplicateError, RazorpayUnknownOutcomeError, RazorpayNotFoundEr
 /** Razorpay requires a payment link to live at least 15 minutes. */
 const MIN_EXPIRY_MS = 15 * 60 * 1000;
 const DEFAULT_EXPIRY_MS = 72 * 60 * 60 * 1000;
+
+/**
+ * Recorded on every rail-nudge receipt. See note 4 in the file header: the UPI restriction is
+ * intended, is impossible in test mode, and its absence must be visible on the receipt rather
+ * than inferred from a link that quietly accepts cards too.
+ */
+export const UPI_LINK_TEST_MODE_CAVEAT =
+  'UPI-only restriction (upi_link) requested but NOT applied: Razorpay supports UPI Payment Links ' +
+  'in live mode only, confirmed by a 400 on 2026-08-26. The link carries no method restriction, so it ' +
+  'offers whatever this account has enabled — the rail switch is still available to the payer, only ' +
+  'the pre-selection is lost.';
 
 /** Payment link status -> our receipt state. */
 const LINK_STATE = {
@@ -317,12 +353,14 @@ export function createLiveGateway({
         reminder_enable: false,
         notes: notesFor(req, reference),
         ...(callbackUrl ? { callback_url: callbackUrl, callback_method: 'get' } : {}),
-        // A UPI-only link is genuinely fewer taps than a card flow, which is the entire
-        // mechanism SWITCH_RAIL_NUDGE is betting on. Cannot be combined with partial.
-        ...(wantsUpi ? { upi_link: true } : {}),
+        /**
+         * `upi_link: true` IS DELIBERATELY ABSENT, AND USED TO BE HERE. See note 4 in the
+         * file header — Razorpay refuses it outright in test mode, so this gateway can never
+         * send it.
+         */
       };
 
-      const extra = wantsUpi ? ['Link restricted to UPI (upi_link=true), which is the rail this action is nudging toward.'] : [];
+      const extra = wantsUpi ? [UPI_LINK_TEST_MODE_CAVEAT] : [];
       const receipt = await createLink(req, reference, body, at, extra);
 
       if (!notifiable) {

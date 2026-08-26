@@ -253,7 +253,7 @@ test('9. the rail switch is quoted as an exact break-even probability, not an in
 
 /* ─────────────────────────────────── the action ─────────────────────────────────── */
 
-test('10. the link it issues is restricted to the rail it is nudging toward, and notifies nobody', async () => {
+test('10. the link it issues is honest about the rail it could NOT restrict, and notifies nobody', async () => {
   const fake = createFakeRazorpay();
   await seedDecline(fake, { errorReason: 'international_transaction_not_allowed' });
   const out = await runCli({ fake });
@@ -261,7 +261,16 @@ test('10. the link it issues is restricted to the rail it is nudging toward, and
   assert.ok(out.link?.startsWith('plink_'), `expected a payment link id, got ${out.link}`);
   const stored = out.fake.links.get(out.link);
   assert.ok(stored, 'the link must exist on the provider, not just in our output');
-  assert.equal(stored.upi_link, true, 'a UPI-only link is the mechanism SWITCH_RAIL_NUDGE is betting on');
+  /**
+   * This assertion was `upi_link === true` until 2026-08-26, when the real API answered
+   * "UPI Payment Links is not supported in Test Mode" and the whole path turned out to have never
+   * worked. Both halves matter now: the flag must not be sent, AND the screen must say the
+   * restriction was wanted and is missing. A silently unrestricted link that the narration calls a
+   * rail switch is a worse outcome than the 400 was.
+   */
+  assert.equal(stored.upi_link, false, 'test mode refuses upi_link, so it must not be sent');
+  assert.match(out.output, /upi_link requested, NOT applied/, 'the screen must own the missing restriction');
+  assert.match(out.output, /live mode only/i, 'and say why it is missing');
   assert.equal(stored.reminder_enable, false, 'Razorpay reminders would contact outside our own ledger');
   assert.equal(stored.notify?.sms, false);
   assert.equal(stored.notify?.email, false);
