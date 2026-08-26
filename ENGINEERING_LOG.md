@@ -3765,3 +3765,77 @@ being broken and everything being wrong, which is precisely the class of defect 
 the author cannot see. It is the same lesson as Day 11 in a different costume: my own artefacts agree with
 me, so verification has to come from something I did not write — and a page I have to read with my eyes
 is, for this purpose, something I did not write.
+
+---
+
+## Day 12 (addendum) — I wrote the warning, in the file, in advance, and walked into it anyway
+
+**Symptom.** None. Nothing failed, nothing was slow, no number looked wrong. This one surfaced because
+somebody asked me a question about an *old* defect and I went to re-read the guard rather than answer
+from memory.
+
+**Context — the guard in question.** The evaluation claim of this project rests on the agent being
+structurally unable to read the simulator's answer key. That is enforced three ways, deliberately chosen
+to fail differently: `src/agent/observe.js` projects gateway events through an **allowlist**, so a field
+nobody thought about is invisible by default; `test/boundary.test.js` **scans agent source at build
+time** for forbidden field names; and `test/api.test.js` **inspects real HTTP responses at runtime** for
+the same names.
+
+The third of those exists because of defect #75, and #75 is worth restating because it defines the class.
+The generator stamps `_generatedVague: true` onto exactly those failures whose error text was chosen to
+be unmatchable — an answer key that says *which cases are hard*. The store copies gateway events
+wholesale into case records, and the dashboard serves case records over HTTP. So the flag travelled to
+the browser without any agent file ever naming it. **A source scan cannot catch a leak that no source
+line mentions.** Hence a second check, over the wire, on what actually came back.
+
+**Root cause.** Adding that runtime check meant the token list had two consumers, so I put the list in
+`src/core/groundTruthTokens.js` and had the runtime check import it. The build-time scan kept its own
+copy. I noticed the hazard at the time and wrote it into the shared file's header, verbatim: *"two checks
+reading two copies of a denylist is a bug waiting for one of them to be updated alone."*
+
+Then on Day 10 I added a fourteenth token — `selfRecoverAt`, the instant an untouched case would have
+paid on its own — to the shared register, for the runtime check, and not to the scan's copy. For sixteen
+days the build-time scan would not have flagged agent code reading it.
+
+`selfRecoverAt` is the worst possible field to lose from that list. It is not merely a hint; it is the
+whole game. An agent that can see it stops working on every case destined to fix itself for free, spends
+nothing on them, and books the recoveries anyway — producing a cost-per-recovery and a recovery rate
+that no real integration could reproduce, with no code that looks suspicious in review.
+
+**Was it a breach?** No, and I checked before saying so rather than after. `src/agent`, `src/api`,
+`src/razorpay` and `src/ml` contain no reference to the token; the only references anywhere are the
+register itself, `src/eval/perturbations.js` (which is permitted — scoring is the one job that may see
+truth), `src/sim/*` and tests. **No measured figure in this project is affected.** It was a gap in the
+lock, not a break-in.
+
+That distinction is the uncomfortable part. A guard that has narrowed is invisible precisely because it
+still reports green: the scan ran, found nothing, and passed — which is indistinguishable from a scan
+that could not have found anything. This is the same failure shape as the Day 4 negative-control lesson,
+arriving through a completely different door. There, a detector that had never fired could not be
+distinguished from a broken one. Here, a detector that had *shrunk* could not be distinguished from a
+complete one. Both read as success.
+
+**Fix.** The scan now reads `GROUND_TRUTH_TOKENS` directly. The annotated list is kept, renamed
+`LOCAL_TOKENS`, purely as the history of why each token is on the register — that reasoning is the most
+valuable thing in the file and deleting it to remove the duplication would have been the wrong trade. A
+new test pins `LOCAL_TOKENS` as a **subset** of the register, so the register stays free to grow while
+the two can never disagree about a token again, and asserts `selfRecoverAt` is present by name so this
+specific regression cannot recur silently. `3a7211e`. Suite 729/729 across 20 suites.
+
+**Lesson.** Writing the warning down did nothing. That is the actual finding, and it is the second time
+this project has produced it — the Windows `pathname` bug also recurred in a file whose own comment
+warned about it, which is why that one ended as a static check too. A hazard I can describe precisely
+enough to write a sentence about is a hazard I can write an assertion about, and until I do, the sentence
+is a record of my having known better.
+
+The narrower generalisation is about duplication in guards specifically. Duplicated *logic* announces
+itself: the two copies drift, behaviour diverges, something breaks loudly. Duplicated *safety
+configuration* drifts in silence, and it drifts asymmetrically — the copy you edit is the one you were
+thinking about, so the copy left behind is always the one guarding the thing you were not thinking
+about. There is now one register and one place to add to it.
+
+**And the honest reason I found it at all.** Not review, not a test, not a run. Somebody asked me why a
+line existed in a to-do list, and answering properly meant opening the file instead of recalling it.
+Sixteen days of green builds did not surface this; one question did. Which is consistent with everything
+else in this log: **eleven of the defects recorded here flattered the headline number, and not one was
+found by looking at the headline number.**
