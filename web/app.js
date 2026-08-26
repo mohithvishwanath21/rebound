@@ -678,14 +678,21 @@ function Clock({
             ? html`Running. Each cycle is a real pass over every open case — diagnose, price every permitted action,
                 take the best one if it clears the bar, and persist why. <strong>No money appears while this
                 runs</strong>, because a run you can stop halfway is a truncated run, and truncation flatters us.`
-            : nextQuiet
-              ? html`The next cycle lands inside quiet hours (21:00–09:00 IST), so <strong>no message will go out on
-                    it</strong>. Quiet hours are twelve hours wide and the clock steps twelve hours, so cycles alternate:
-                    half of them can do no customer contact at all. If you approve a message now, the agent re-decides at
-                    02:30, and if its best remaining action moves money instead, it will come back here rather than reuse
-                    your signature.`
-              : html`The next cycle lands in legal contacting hours, so an approved message goes out on it. The one after
-                  that will not — quiet hours are twelve hours wide and the clock steps twelve hours, so they alternate.`}
+            : finished
+              ? html`The horizon is finished — ${run.horizon.cycles} cycles of ${run.horizon.stepHours} hours, which is
+                  ${run.horizon.days} simulated days. <strong>There is no next cycle</strong>, so nothing above this line
+                  will change again; what you are looking at is a record rather than a process. No recovery total is
+                  computed here and none may be quoted from this screen — a console run pauses for a human, and a
+                  truncated run is biased twice in our favour. Money comes from <code>npm run eval</code>. To watch it
+                  work again, restart the server: the seed is fixed, so you get the same batch from the beginning.`
+              : nextQuiet
+                ? html`The next cycle lands inside quiet hours (21:00–09:00 IST), so <strong>no message will go out on
+                      it</strong>. Quiet hours are twelve hours wide and the clock steps twelve hours, so cycles alternate:
+                      half of them can do no customer contact at all. If you approve a message now, the agent re-decides at
+                      02:30, and if its best remaining action moves money instead, it will come back here rather than reuse
+                      your signature.`
+                : html`The next cycle lands in legal contacting hours, so an approved message goes out on it. The one after
+                    that will not — quiet hours are twelve hours wide and the clock steps twelve hours, so they alternate.`}
       </p>
 
       ${finished && steppable && frozen > 0

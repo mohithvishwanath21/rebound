@@ -434,6 +434,29 @@ test('a finished run with unsigned cases says the gate is what held them', () =>
   assert.match(text, /Nothing was spent on them and nothing came back from them/);
   assert.match(text, /Horizon complete/, 'and the button must say so rather than inviting another click');
 
+  /**
+   * This pair of assertions is the one that was missing, and its absence is the whole lesson. The test
+   * above checked that the right sentences were PRESENT and never that the wrong one was GONE, so for as
+   * long as the finished state existed, the paragraph under the buttons went on describing "the next
+   * cycle" — quiet hours or legal hours — on a run that had no next cycle. The button correctly greyed
+   * out to "Horizon complete" one line above it. Nothing was red, nothing threw, and 729 tests were
+   * green: the screen was simply making a claim the system could not honour, which is the same defect
+   * shape as a guard that has narrowed and still reports green.
+   *
+   * A finished run is a record, not a process. Asserting the negative is the only way to keep it one.
+   */
+  assert.doesNotMatch(
+    text,
+    /The next cycle lands/i,
+    'a finished horizon has no next cycle, so the screen must not describe where one would land — this is ' +
+      'the assertion whose absence let the console promise a cycle that could never run'
+  );
+  assert.match(
+    text,
+    /There is no next cycle/,
+    'and it must say so positively, because silence would leave the reader to infer it from a greyed button'
+  );
+
   const singular = paint('clock/finished-one-frozen', 'Clock', {
     run: finished,
     busy: false,

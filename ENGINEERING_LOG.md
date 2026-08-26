@@ -3884,3 +3884,49 @@ had written down as 551 spoken words and which measured 835, a minute and a half
 were sentences about things sitting on my disk, checkable in seconds, asserted from memory instead. The
 write-up is the least tested artefact in the repository and it is the only one a judge is guaranteed to
 read.
+
+## Day 13 — the screen promised a cycle that could never run
+
+**How it was found.** Not by a test. Mohit ran the console to horizon, noticed the button would not run
+again, and asked whether that was correct. It was correct. The sentence underneath it was not.
+
+**Symptom.** In CONSOLE mode with the horizon finished, the explanatory paragraph under the run controls
+read *"The next cycle lands in legal contacting hours, so an approved message goes out on it"* — or the
+quiet-hours variant of the same claim. There is no next cycle. `cyclesRun` had reached
+`horizon.cycles`, `advance()` was returning `ran: false`, and the server was refusing with
+*"the horizon is finished; there are no cycles left to run."*
+
+**Root cause.** The paragraph is a ternary chain: `mode !== 'CONSOLE'` → the measured-run message,
+then `running` → the during-a-run message, then `nextQuiet` → one of two next-cycle messages. The
+MEASURED arm had a finished-horizon message. The CONSOLE arm never got one, so a finished console run fell
+through to a branch whose entire premise — that there is a cycle after this one — was false.
+
+**Why no test caught it.** `test/web.test.js` already had a test named *"a finished run with unsigned cases
+says the gate is what held them"*, and it rendered exactly this state. It asserted three things: the frozen
+sentence, its singular form, and that the button reads `Horizon complete` rather than inviting another
+click. All three were true. It never asserted that the *wrong* sentence was gone.
+
+That is the same defect shape as the denylist that drifted two entries above: **a check that only asserts
+presence cannot notice a false claim sitting beside the true ones.** Nothing threw, nothing rendered red,
+729 tests were green, and the button one line above the false sentence was correctly greyed out — which
+made the paragraph *more* plausible, not less, because the screen was visibly in the right state.
+
+**Fix.** A `finished` branch in the CONSOLE arm, before `nextQuiet`. It states the horizon in the run's own
+units (`21 cycles of 12 hours, which is 10 simulated days`), says plainly that there is no next cycle and
+nothing above the line will change again, restates why no money total appears on a paused console run, and
+tells the reader to restart the server for a fresh batch — the seed is fixed, so it is the same batch from
+the beginning.
+
+**And the assertion that was missing**, added to the existing test rather than a new one:
+`assert.doesNotMatch(text, /The next cycle lands/i)` alongside `assert.match(text, /There is no next
+cycle/)`. The negative is the load-bearing one. Verified by mutation: stubbing the new branch off with
+`false && finished` fails that test and only that test, 41/42. A test that passes against both the broken
+and the fixed code is decoration.
+
+**Lesson, and it is a repeat.** Every assertion in this suite that checks only for presence is blind to a
+contradiction placed next to what it checks. The screen was not missing a sentence; it had an extra one
+that could not be true. I have now found this shape three times — the denylist with two copies, the README
+that generalised a stop record backwards over nine decisions, and this — and all three were found by a
+person asking a question, never by the suite. Reading the rendered page remains the highest-yield technique
+on this project, and "does this screen also say anything it shouldn't?" is the question the suite cannot ask
+itself.
