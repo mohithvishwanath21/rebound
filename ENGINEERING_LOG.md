@@ -3930,3 +3930,87 @@ that generalised a stop record backwards over nine decisions, and this — and a
 person asking a question, never by the suite. Reading the rendered page remains the highest-yield technique
 on this project, and "does this screen also say anything it shouldn't?" is the question the suite cannot ask
 itself.
+
+## Day 14 — the command in the documentation was not the command that ran
+
+**How it was found.** Mohit reported that "Run to horizon" was greyed out, then that it was still greyed
+out after a restart, then after a restart *and* a reload. I checked everything reachable from my side and
+all of it was healthy: `finished` was false, `steppable` was true, `onRun` was threaded correctly through
+three components, `busy` and `running` both reset in `finally`, and a port clash printed a clear message.
+I was about to blame Windows IPv6 resolution of `localhost`. Then he pasted the terminal output, and the
+answer was in npm's own echo of the command, four lines from the top:
+
+```
+> rebound@0.1.0 api
+> node src/demo/cli/serve.js
+```
+
+He had typed `npm run api -- --count=40 --approver=HUMAN --port=8788`. npm ran
+`node src/demo/cli/serve.js`. Every flag was dropped, silently, and npm printed the truncated command it
+actually ran without comment.
+
+**Symptom.** The banner said `n=80`, `mode MEASURED`, `APPROVER: SIM` and `http://127.0.0.1:8787` —
+every one of those the default, none of them what was asked for. `http://127.0.0.1:8788` had no page
+because nothing was listening there. And in MEASURED mode `steppable` is `run.mode === 'CONSOLE'`, which
+is false, so the clock buttons are disabled. **Nothing was broken.** The button was disabled because the
+horizon of a measured run is already complete, which is the correct and intended behaviour, and the page
+said so in the sentence underneath. Restarting reproduced it faithfully every time, which is exactly what
+made it look like a defect in the page rather than in the command.
+
+**Root cause.** npm's argument forwarding after `--` is not portable. It depends on the npm version and
+on the shell, and on his shell it dropped everything. The project's fault was not that this happens — it
+is that **every command a demo depended on was expressed in the fragile form**, in the README a judge
+copies from, in the video script, in the browser checklist and on the cheat sheet.
+
+**The one that matters more than the button.** The video script's strongest minute opens with
+`npm run recover-live -- --replay`, which re-narrates a stored real recovery offline. With the flag eaten
+that is `npm run recover-live`, and that command does not fail — it takes the live path: loads `.env`,
+calls the real Razorpay API, searches for a real decline and issues a **new** payment link. So the same
+shell behaviour that greys out a button on one command silently converts an offline replay into a live
+money operation on another, on camera, printing payment IDs that match nothing on the cheat sheet. The
+dead button was the cheap symptom of the expensive bug.
+
+**Two more found while auditing the same shape.** `PITCH.md` said "reproduce these figures with
+`npm run api -- --approver=SIM --count=40`" — a dropped `--count` hands a judge the 80-case default and a
+table that does not match the quoted numbers, which reads as fabricated figures rather than as a shell
+quirk. And `src/sim/cli/describe.js` printed `Run \`npm run eval -- --sweep\``, a flag `eval` has never
+had; the sweep is its own command. A reader following that instruction would have got a single-world eval
+and no indication the flag was ignored.
+
+**Fix, in the order it matters.**
+
+1. Flags whose absence changes what a command *does* now live inside the script string, where no shell can
+   reach them: `npm run console` (`--count=40 --approver=HUMAN`) and `npm run replay` (`--replay`).
+   `npm run api` still accepts flags for exploring seeds and splits, where a dropped flag is visible in
+   the banner and costs nothing.
+2. The server states its mode on the **last line before the prompt**, next to the URL about to be
+   clicked — a MEASURED run now says the clock buttons are disabled by design and names the command that
+   gives a live one. `mode MEASURED` was already printed at the top and was useless: by the time the URL
+   appears it has scrolled behind a five-arm table.
+3. Documentation uses a flagless npm script or a direct `node src/...` call, never `npm run X -- --flag`.
+   README, PITCH.md, the `--help` text, and the on-screen "then run" instruction after beat 4 all changed.
+4. The EADDRINUSE message stopped recommending `npm run api -- --port=N`, which was the exact form that
+   had just failed.
+
+**The test, and why it is positional.** `test/commands.test.js` asserts that the demo-critical scripts
+carry their own flags, that every `npm run` name the README mentions exists in `package.json`, and that no
+forwarded-flag command appears in any *copyable* region — fenced blocks and table rows — of README.md,
+PITCH.md or the explainer. My first version scanned whole files and failed immediately, on the paragraph
+that explains this fix and therefore has to name the broken command. A check that cannot distinguish a
+warning from an instruction forces the documentation to stop explaining itself, which is worse than the
+bug. So prose may discuss the fragile form; the places a reader copies from may not contain it. Verified by
+mutation: putting the old command back in the README table fails exactly one test, 5 of 6 remaining green.
+
+**Lesson.** The recurring failure in this log is a fake, a stub or a test agreeing with me because I wrote
+both sides of it. This one is the same error moved one layer out: **the command in the documentation was a
+claim about the system, and it had never been executed by anything except me, on my own shell, where it
+happened to work.** A README is not prose, it is an untested integration path — the first one every
+reviewer runs and the only one where failure costs you the reader rather than a test run. There is now a
+test that executes it as text, and the rule it encodes is narrow enough to be honest: if the absence of a
+flag changes behaviour, the flag does not belong on the command line of a documented command.
+
+Also worth writing down because it nearly cost an hour: **I was one tool call from "fixing" IPv6.** Every
+hypothesis I could check from inside the sandbox was about my own code, because that is what the sandbox
+can see, and all of them were wrong. The diagnosis came from four lines of his terminal output that I had
+not asked for. When the reported symptom survives every check you can run, the next move is to read what
+the other machine actually printed, not to keep generating hypotheses about the half you can see.

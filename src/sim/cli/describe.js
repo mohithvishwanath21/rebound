@@ -15,8 +15,11 @@
  * able to read all of them in one place and in under two minutes.
  *
  * If a judge thinks one of these is wrong, the sweep range tells them whether it
- * matters. `npm run eval -- --sweep` re-runs the comparison across these ranges and
- * reports whether the ranking between policies ever flips.
+ * matters. `npm run sweep` re-runs the comparison across these ranges and reports whether the
+ * ranking between policies ever flips; `npm run sweep-report` re-prints the finished table from
+ * the committed row JSONs in under a second. There is no `--sweep` flag on `npm run eval` — this
+ * comment claimed one for weeks, which would have sent a reader to a plain eval that silently
+ * ignored the flag and reported a single world as if it were the sweep.
  */
 
 import { ASSUMPTIONS } from '../responseModel.js';
@@ -171,4 +174,4 @@ console.log(wrap(
   'why the sweep ranges above are wide, and why any claim of a specific recovery ' +
   'percentage is stated as a range with its assumptions attached.', 76, '  '
 ));
-console.log(`\n${DIM}  Run \`npm run eval -- --sweep\` to see whether any of these change the ranking.${OFF}\n`);
+console.log(`\n${DIM}  Run \`npm run sweep-report\` to see whether any of these change the ranking.${OFF}\n`);

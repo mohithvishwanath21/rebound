@@ -4,8 +4,10 @@
  * Why this file exists at all: every number in the pitch video has to be
  * reproducible from the repo. `Math.random()` would make the evaluation
  * unrepeatable, which would quietly turn "measured lift" into "a lift I saw once."
- * With a seeded RNG, `npm run eval -- --seed 42` produces byte-identical results
- * on a judge's machine.
+ * With a seeded RNG, `node src/eval/cli/run.js --seed=42` produces byte-identical results
+ * on a judge's machine. Written as a direct node call with an `=`: the spaced form `--seed 42` is a
+ * hard error by design (see eval/cli/flags.js), and npm's forwarding after `--` is eaten by some
+ * shells, which would silently give the reader seed 1 and a different set of numbers.
  *
  * mulberry32: small, fast, good enough statistical quality for simulation work.
  * Not cryptographic — never use this for anything security-related.

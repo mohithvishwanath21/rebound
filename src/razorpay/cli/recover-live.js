@@ -52,8 +52,16 @@
  * USAGE
  *   npm run recover-live                       beats 1-4: find the decline, diagnose it,
  *                                              price the options, issue a link on a live rail
- *   npm run recover-live -- --confirm plink_X   beat 5: read the recovery back
- *   npm run recover-live -- --replay            re-narrate the last real run, offline
+ *   npm run replay                             re-narrate the last real run, offline
+ *   node src/razorpay/cli/recover-live.js --confirm plink_X
+ *                                              beat 5: read the recovery back
+ *
+ * The two flagged forms are spelled out as direct `node` calls, and `--replay` has its own flagless
+ * npm script, for one reason: npm's argument forwarding after `--` depends on the shell, and on a
+ * Windows shell it silently dropped every flag. Everywhere else that costs you the wrong seed. Here it
+ * costs you the wrong *blast radius* — `npm run recover-live -- --replay` with the flag eaten is
+ * `npm run recover-live`, which does not replay anything: it calls the real API and issues a new
+ * payment link. The safe mode must not be reachable only through an argument that a shell can drop.
  *
  * The `--replay` mode matters more than it looks. The live beats need network and a human to pay
  * a link; a recording session does not always have both. Replay reads a real run's evidence file
@@ -380,13 +388,16 @@ export async function main({ argv = process.argv.slice(2), fetchImpl, sleep, evi
     sink(
       [
         '',
-        'Usage: npm run recover-live [-- options]',
+        'Usage: node src/razorpay/cli/recover-live.js [options]',
         '',
         '  (no options)              find a real decline, diagnose it, price the options, issue a link',
         '  --confirm <plink_id>      read the recovery back after paying the link',
-        '  --replay                  re-narrate the last real run, offline, from its evidence file',
+        '  --replay                  re-narrate the last real run, offline  (or: npm run replay)',
         '  --ref <reference_id>      scope the search to one link\'s rebound_ref',
         '  --amount <rupees>         amount for the recovery link (default 499)',
+        '',
+        '  Spelled as a node call, not `npm run recover-live -- --flag`: some shells drop everything',
+        '  after `--`, and a dropped --replay runs the LIVE recovery instead of the offline one.',
         '',
       ].join('\n')
     );
@@ -637,7 +648,7 @@ export async function main({ argv = process.argv.slice(2), fetchImpl, sleep, evi
   );
   reel.say('');
   reel.say(`  ${yellow(bold('YOUR TURN'))} open that url and pay it with UPI id  ${bold('success@razorpay')}`);
-  reel.say(`  ${dim('then run')}  npm run recover-live -- --confirm ${plink ?? 'plink_XXXX'}`);
+  reel.say(`  ${dim('then run')}  node src/razorpay/cli/recover-live.js --confirm ${plink ?? 'plink_XXXX'}`);
 
   const path = writeEvidence(
     {

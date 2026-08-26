@@ -92,13 +92,22 @@ Zero dependencies, no build step, no network required — React and htm are comm
 
 | Command | What it does |
 | --- | --- |
-| `npm test` | 729 tests, 20 suites, ~50s |
+| `npm test` | 735 tests, 20 suites, ~50s |
 | `npm run eval` | the five-arm paired comparison — this is where the money figures come from |
 | `npm run sweep-report` | the 26-world assumption sensitivity sweep |
-| `npm run api -- --count=40 --approver=HUMAN` | the operator console on `localhost:8787`; you are the approver |
-| `npm run recover-live -- --replay` | replays the real recovery offline from stored evidence |
+| `npm run console` | the operator console on `http://127.0.0.1:8787`; you are the approver |
+| `npm run replay` | replays the real recovery offline from stored evidence |
 | `npm run recover-live` | the real thing; needs `.env` with test-mode keys |
 | `npm run doctor` | checks the live test-mode credentials only |
+
+Every command above is written without `--`, and that is deliberate rather than tidy. Reaching console
+mode by forwarding the approver flag after `--` is the same run, but whether the flag survives depends on
+your npm version and your shell — on a Windows shell it was dropped silently, npm echoed the command with
+no arguments, and the server came up in its default measured mode, where the clock buttons are correctly
+disabled and therefore look broken. The same shell behaviour turns the forwarded `--replay` into a plain
+`npm run recover-live`, which is not an offline replay but a live call against the Razorpay API. Any flag
+whose absence changes what a command *does* now lives inside the script; `npm run api` still takes flags
+for exploring other seeds and splits, where a dropped flag is visible in the banner and costs nothing.
 
 A `rzp_live_` key is refused outright. `.env` is gitignored and the test suite is wired to a
 deliberately nonexistent env path so it can never read real credentials.

@@ -1,7 +1,12 @@
 # Rebound — what it is, and how to say it
 
 Everything below uses real figures from a real run. Reproduce with
-`npm run api -- --approver=SIM --count=40` (seed 1, 40 cases).
+`node src/demo/cli/serve.js --approver=SIM --count=40` (seed 1, 40 cases).
+
+Written as a direct `node` call rather than `npm run api -- --count=40`: npm's flag forwarding after
+`--` depends on the shell, and a dropped `--count` silently gives you the 80-case default, whose figures
+are different from every number quoted below. A reproduction instruction that can quietly reproduce
+something else is worse than none.
 
 ---
 

@@ -193,7 +193,11 @@ const server = createApiServer({ session, staticDir: existsSync(WEB_DIR) ? WEB_D
 server.on('error', (err) => {
   if (err?.code === 'EADDRINUSE') {
     process.stderr.write(
-      `\n  Port ${f.port} is already in use. Start on another one: npm run api -- --port=${f.port + 1}\n\n`
+      `\n  Port ${f.port} is already in use. Start on another one:\n` +
+        `    node src/demo/cli/serve.js --port=${f.port + 1}${f.approver === 'HUMAN' ? ' --count=40 --approver=HUMAN' : ''}\n\n` +
+        '  Written as a direct node call, not `npm run api -- --port=...`, on purpose: npm\n' +
+        '  forwarding after `--` depends on your shell and has silently dropped every flag\n' +
+        '  before now, which starts the server on defaults you did not ask for.\n\n'
     );
     process.exit(2);
   }
@@ -210,6 +214,36 @@ server.listen(f.port, '127.0.0.1', () => {
    * a single-operator console, and changing it should require editing this line and reading this note.
    */
   process.stdout.write('  Loopback only, no auth: POST /api/approvals grants approvals for real.\n\n');
+  /**
+   * WHY THE MODE IS RESTATED HERE, ON THE LAST LINE BEFORE THE PROMPT
+   * -----------------------------------------------------------------
+   * The banner at the top already says `mode MEASURED`, and it is true, and it is useless: by the time
+   * the URL appears it has scrolled behind an arm table. A MEASURED run's Advance and Run-to-horizon
+   * buttons are disabled by design — the horizon is already complete, so there is nothing to advance —
+   * and the page states that correctly in the sentence under them. But a greyed button is read as a
+   * broken button, and the person reading it is standing in a terminal, not in the source.
+   *
+   * This cost a real half-hour: `npm run api -- --approver=HUMAN` had every flag eaten by the shell,
+   * npm echoed the command with no arguments, the server came up MEASURED, and the symptom presented
+   * as an unclickable button that survived a restart and a reload — because each restart reproduced it.
+   * Nothing was broken. Nothing said so where it would be read.
+   *
+   * The rule this encodes: when a flag silently changes which controls are live, the mode belongs on
+   * the last line printed, next to the URL the person is about to click.
+   */
+  if (meta.mode === 'MEASURED') {
+    process.stdout.write(
+      '  MODE: MEASURED. The horizon is already run, so "Advance 12 hours" and "Run to horizon"\n' +
+        '  are DISABLED on that page — by design, not a fault. For the clickable console with a\n' +
+        '  live approval queue, stop this and run:  npm run console\n\n'
+    );
+  } else {
+    process.stdout.write(
+      `  MODE: CONSOLE, paused at cycle ${meta.cyclesRun} of ${meta.horizon.cycles}. The clock buttons are live.\n` +
+        '  No money figures in this mode, on purpose. A run reaches its horizon once; to replay it,\n' +
+        '  restart this command and reload the page (F5).\n\n'
+    );
+  }
 });
 
 /**

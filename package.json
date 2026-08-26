@@ -13,8 +13,10 @@
     "verify-sim": "node src/sim/cli/verify.js",
     "live-check": "node src/razorpay/cli/live-check.js",
     "recover-live": "node src/razorpay/cli/recover-live.js",
+    "replay": "node src/razorpay/cli/recover-live.js --replay",
     "doctor": "node src/razorpay/cli/doctor.js",
     "api": "node src/demo/cli/serve.js",
+    "console": "node src/demo/cli/serve.js --count=40 --approver=HUMAN",
     "eval": "node src/eval/cli/run.js",
     "sweep": "node src/eval/cli/sweep.js",
     "sweep-report": "node src/eval/cli/sweep.js --report-only --out=docs/evidence/sweep-2026-08-26/rows",
@@ -29,6 +31,8 @@
   },
   "comments": {
     "scripts": [
+      "`console` exists because `npm run api -- --approver=HUMAN` is not portable. npm's `--` forwarding depends on the npm version and the shell: on a Windows shell it silently dropped every flag, npm echoed `> node src/demo/cli/serve.js` with no arguments, and the server started on its defaults — `--approver=SIM`, which is MEASURED mode, whose Advance and Run-to-horizon buttons are disabled BY DESIGN. The failure is invisible unless you read the banner, and it presents as a dead button on a page that looks otherwise healthy. Flags that must arrive are now baked into the script string, where no shell can eat them. `npm run api` keeps taking flags for exploration; nothing a demo depends on should.",
+      "`replay` is the same fix on a sharper edge, and it is the reason the whole class was worth chasing. `npm run recover-live -- --replay` re-narrates a stored real recovery offline. `npm run recover-live` with the flag missing does not fail — it takes the live path: loads `.env`, calls the real Razorpay API, searches for a real decline and issues a NEW payment link. So the exact shell bug that greys out a button on one command silently converts an offline replay into a live money operation on another, printing payment IDs that match nothing you rehearsed. A flag whose absence changes the blast radius must never depend on argument forwarding.",
       "`decide-report` and `orchestrate-report` answer two different questions and both are in `check` on purpose. `decide-report` prints what the policy EXPECTS to recover — arithmetic over its own estimates, nothing executed. `orchestrate-report` runs the loop against the simulated gateway across several cycles and prints what a receipt actually said was captured. A regression that leaves the EV maths intact but breaks execution, scheduling or the guardrail ledger is invisible to the first and loud in the second.",
       "`select-arm` is deliberately NOT part of `check`. It runs a 20-world sweep and takes about 90 seconds, and `check` has to stay fast enough to run on every change. The plumbing and the statistics are covered by test/armSelection.test.js, which runs the same procedure on three tiny worlds in under two seconds; the full sweep is a deliberate act you perform when choosing which model the decision engine is built on, not a per-commit check.",
       "`select-arm` is also the only command permitted to decide that choice. `model-report` scores the reserved held-out batch and is for final reporting only — reading an arm choice out of it is what went wrong on Day 5.",

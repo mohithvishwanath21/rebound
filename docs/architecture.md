@@ -175,7 +175,7 @@ mid-horizon so a human can approve things — prints **no money figures at all**
 | `src/api/` | readModel, server |
 | `src/demo/` | session — wires a world, a store and an approver into one runnable console batch |
 | `web/` | the operator console: `app.js` plus committed React/htm, no build step |
-| `test/` | 20 suites, 729 tests, including `boundary.test.js` and `web.test.js` |
+| `test/` | 20 suites, 735 tests, including `boundary.test.js` and `web.test.js` |
 
 `web/app.js` is a classic script, not a module — every component is a top-level function declaration so
 the test harness can reach it by name in a `vm` context and render it without a browser.
