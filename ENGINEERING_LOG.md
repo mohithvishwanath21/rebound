@@ -3500,6 +3500,32 @@ stress test not a sensitivity row**, which moves 22 to 38 (5.5% to 9.5%) and sti
 family — it holds at 3 of 5 but drops the pooled ratio to 1.71x, the largest single-assumption fall in
 the whole sweep outside the joint draws.
 
+#### That row also disagrees with itself, and the disagreement is the lesson
+
+`self-recovery-x0.7` has a **lower** pooled ratio than the control (1.7145x vs 1.8728x) and a **higher**
+mean paired difference (+Rs 59,712 vs +Rs 58,483). Both are correctly computed. They disagree because
+they are different estimators of different quantities, and the per-world figures say exactly why:
+
+    seed   Rebound incremental   B3 incremental      paired diff
+     1        4,59,987              86,060  (73,000)   +3,73,927
+     2          24,908              14,987             +   9,921
+     3          94,458            1,78,200 (1,77,492)  -  83,742
+     4        1,04,067              60,108  (16,694)   +  43,959
+     5          32,987              78,493  (52,864)   -  45,506
+    pooled     7,16,407            4,17,848            (control: 6,27,454 / 3,35,037)
+
+Fewer customers paying unprompted means a smaller counterfactual deduction, so **every arm's incremental
+figure rises** — Rebound by Rs 88,953 and B3 by Rs 82,811. B3 rises from a base less than half the size,
+so the *ratio* between them narrows while the *gap* between them widens by Rs 1,229 on average.
+
+The reason this is worth six lines: **quoting only the ratio here says "Rebound got worse", quoting only
+the difference says "Rebound got better", and both sentences are defensible.** That is what a metric
+looks like when the choice of metric is doing the arguing. A ratio compresses to one number and hides
+that both terms moved; a difference keeps the units but is dominated by seed 1. The table prints both
+side by side in every row for this reason, and the honest reading of this row is the third sentence:
+Rebound recovers more absolute money when customers are less likely to self-cure, and less of an
+*advantage*, because the dumb fixed ladder is picking up some of the same newly-uncured money.
+
 The general point, stated against myself: **a row that holds at ±30% is not evidence that ±30% is the
 right band.** The band is a declared assumption too, and on this parameter it was too narrow to be a
 test at all until I checked how many cases it could physically move.

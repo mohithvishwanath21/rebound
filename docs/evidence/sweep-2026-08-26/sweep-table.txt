@@ -70,14 +70,18 @@
     ev-bar-k0  attempts +64, same recovery. Moved: attempts, retries, failedRetries, messages, netPaise, stoppedCases
 
   THE RANKING FLIPPED HERE. These are the assumptions the conclusion actually rests on:
-    cause-mix-do-not-honour-x3  (world)  2/5 signs, 1.75x, +Rs.50,488
+    cause-mix-do-not-honour-x3  (world)  2/5 signs vs fixed ladder, 1.75x, +Rs.50,488
       DO_NOT_HONOUR 3x more likely, model refitted
 
   The comparison against the AGGRESSIVE baseline also moved in these rows. The control loses
-  that comparison, so a row where it wins is a world found by searching, not a result:
-    joint-1  4/5 signs, 1.09x
-    joint-2  4/5 signs, 1.08x
-    joint-3  3/5 signs, 1.11x
+  that comparison, so a row where it wins is a world found by searching, not a result.
+  BOTH sign counts are printed because they are counts of DIFFERENT comparisons: the sign
+  count in the table above is vs the fixed ladder, and the one here is vs the aggressive
+  baseline. The same row can legitimately read 5/5 there and 4/5 here; that is two facts,
+  not a contradiction.
+    joint-1  4/5 signs vs aggressive (5/5 vs fixed ladder), 1.09x
+    joint-2  4/5 signs vs aggressive (3/5 vs fixed ladder), 1.08x
+    joint-3  3/5 signs vs aggressive (5/5 vs fixed ladder), 1.11x
 
   A row that shows no movement is only informative if it COULD have moved. The catalogue
   states an expectation for each row in its `why` field, and two of them pre-register a null:

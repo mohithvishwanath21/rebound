@@ -360,15 +360,22 @@ function printFindings(rows, baseline) {
     console.log('');
     console.log('  THE RANKING FLIPPED HERE. These are the assumptions the conclusion actually rests on:');
     for (const r of flips) {
-      console.log(`    ${r.id}  (${r.family}${r.refit ? '' : ', NOT refitted'})  ${r.primary.signs} signs, ${r.primary.pooledIncrementalRatio.toFixed(2)}x, ${rupees(r.primary.meanIncrementalPaise)}`);
+      console.log(`    ${r.id}  (${r.family}${r.refit ? '' : ', NOT refitted'})  ${r.primary.signs} signs vs fixed ladder, ${r.primary.pooledIncrementalRatio.toFixed(2)}x, ${rupees(r.primary.meanIncrementalPaise)}`);
       console.log(`      ${r.label}`);
     }
   }
   if (b2Flips.length) {
     console.log('');
     console.log('  The comparison against the AGGRESSIVE baseline also moved in these rows. The control loses');
-    console.log('  that comparison, so a row where it wins is a world found by searching, not a result:');
-    for (const r of b2Flips) console.log(`    ${r.id}  ${r.secondary.signs} signs, ${r.secondary.pooledIncrementalRatio.toFixed(2)}x`);
+    console.log('  that comparison, so a row where it wins is a world found by searching, not a result.');
+    console.log('  BOTH sign counts are printed because they are counts of DIFFERENT comparisons: the sign');
+    console.log('  count in the table above is vs the fixed ladder, and the one here is vs the aggressive');
+    console.log('  baseline. The same row can legitimately read 5/5 there and 4/5 here; that is two facts,');
+    console.log('  not a contradiction.');
+    for (const r of b2Flips)
+      console.log(
+        `    ${r.id}  ${r.secondary.signs} signs vs aggressive (${r.primary.signs} vs fixed ladder), ${r.secondary.pooledIncrementalRatio.toFixed(2)}x`
+      );
   }
   if (defects.length) {
     console.log('');
