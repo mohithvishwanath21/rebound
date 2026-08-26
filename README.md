@@ -47,9 +47,13 @@ It then takes the best action that survives the guardrails, unless the best acti
 the bar for acting at all, in which case it stops and says so. Three consequences are worth naming,
 because they are the behaviours that distinguish it from a retry loop:
 
-It will decide to do nothing. On a ₹1,442 case in the demo batch, all 23 priced actions came out worth
-less than nothing — chasing cost more than the expected return — so it spent nothing and closed the
-case. Knowing when trying loses money is most of the job.
+It will decide to stop, and it stops while it still has permission to act. On a ₹1,442 lapsed-mandate
+case in the demo batch it sent four WhatsApp nudges across ten decisions, watched the value of chasing
+decay from ₹147 to **−₹3**, and then closed the case with budget unspent — nought of three retries used,
+four of five contacts. It did not run out of permission; it ran out of reasons. On a ₹147 declined card it
+stopped on the *first* look having priced all 23 options and taken none: the best was worth ₹1.80 against
+a ₹2 bar, and at a 35% contribution margin the entire case was only worth ₹51. Knowing when trying loses
+money is most of the job.
 
 It chooses *when*, not just *what*. On a ₹20,857 `do_not_honour` case, retrying immediately ranked
 **ninth**. What won was the same retry six hours later: 7.9% against 12.7%, ₹351 better, at no cost.
