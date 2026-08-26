@@ -3633,3 +3633,17 @@ This is also the answer to the form's last question, and it is a better answer t
 form asks what broke and how I got out, and says it is the one they read first. "A capability my fake
 confirmed and the provider refused, on the only path that touches real money" is a more useful thing to
 have found than anything I would have found by reading my own code again.
+
+**Outcome, same day.** Re-run at 11:26 UTC: beat 4 returned `200` and a real `plink_TUNhyYZ9j1S0nt`.
+At 11:35, after the link was paid by hand, beat 5 read back `status paid`, `₹499 of ₹499`,
+`pay_TUNqn3thLLX5Vp method=netbanking captured`. Same customer, same amount, same account, on a rail
+the card could not use. Two `--confirm` runs in between correctly reported "not paid yet" and are kept
+in `docs/evidence/` rather than deleted — replay supersedes them per beat number, so the record shows
+the command refusing to claim a recovery that had not happened. `--replay` assembles all five beats
+offline and exits 0. Commit `79f5311`.
+
+Worth stating plainly, because it looks like a limitation and is not one: **beat 5 requires a human.**
+Rebound cannot pay a customer's bill. It can diagnose, price, choose, issue and reconcile; the payment
+itself is the customer's act. A recovery product that claimed to close that loop by itself would be
+lying, and the loop we do close is the expensive one — deciding, correctly and cheaply, what to ask
+for.
