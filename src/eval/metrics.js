@@ -384,14 +384,20 @@ async function countRefusals(store, runId) {
  * version: patience is charged per message beyond the first on a case, which is a crude proxy for a
  * real churn effect. The `patienceUnitPaise` figure is a judgement call (see `config.js`) and it is
  * swept in #58 precisely because the ranking should not depend on it.
+ *
+ * `table` is injectable for #58 AND IT IS THE MORE IMPORTANT HALF OF THAT PLUMBING. If only the
+ * decider were perturbed, the sweep would measure "a policy that believes a wrong price" — a
+ * robustness-to-miscalibration question — while claiming to measure "a world where the price is
+ * different". Those have opposite interpretations when the ranking moves: the first says the policy is
+ * fragile, the second says the world matters. Perturbing both keeps it the second one.
  */
-function priceCosts({ actions, escalations, casesTouchedMoreThanOnce }) {
+function priceCosts({ actions, escalations, casesTouchedMoreThanOnce, table = COSTS }) {
   const messageCostPaise = sum(
-    Object.entries(actions.byChannel).map(([ch, n]) => (COSTS.channel[ch] ?? 0) * n)
+    Object.entries(actions.byChannel).map(([ch, n]) => (table.channel[ch] ?? 0) * n)
   );
-  const failedRetryCostPaise = actions.failedRetries * COSTS.failedRetryPenaltyPaise;
-  const patienceCostPaise = casesTouchedMoreThanOnce * COSTS.patienceUnitPaise;
-  const humanReviewCostPaise = escalations * COSTS.humanReviewPaise;
+  const failedRetryCostPaise = actions.failedRetries * table.failedRetryPenaltyPaise;
+  const patienceCostPaise = casesTouchedMoreThanOnce * table.patienceUnitPaise;
+  const humanReviewCostPaise = escalations * table.humanReviewPaise;
 
   return {
     messageCostPaise,
@@ -472,9 +478,17 @@ export function summariseApprovals({ cases, audit }) {
   };
 }
 
-export async function scoreArm({ result, world }) {
+export async function scoreArm({ result, world, config = {} }) {
   const { store, runId, arm } = result;
   const cases = await store.getCases(runId);
+
+  /**
+   * The price and margin tables this score is computed with. Default to the production constants so
+   * every existing caller is byte-identical; #58 passes perturbed ones. See `priceCosts` for why the
+   * scorer must be perturbed alongside the decider rather than instead of it.
+   */
+  const costTable = config.COSTS ?? COSTS;
+  const marginTable = config.CONTRIBUTION_MARGIN ?? CONTRIBUTION_MARGIN;
 
   /**
    * MONEY, RECOMPUTED INDEPENDENTLY. See RULE 1. `runArm` summed receipts as it went; this sums the
@@ -529,6 +543,7 @@ export async function scoreArm({ result, world }) {
     actions,
     escalations: byState[CaseState.ESCALATED] ?? 0,
     casesTouchedMoreThanOnce,
+    table: costTable,
   });
 
   /**
@@ -549,7 +564,7 @@ export async function scoreArm({ result, world }) {
    */
   const marginFor = (c) => {
     const lossType = c.event?.lossType ?? null;
-    const margin = CONTRIBUTION_MARGIN[lossType];
+    const margin = marginTable[lossType];
     if (margin === undefined) {
       throw new Error(
         `metrics: no contribution margin for lossType ${JSON.stringify(lossType)} on case ` +

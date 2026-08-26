@@ -2703,6 +2703,32 @@ and every statistic would have read NaN while `n` still said 5.
 
 ## Day 8 — #61, the simulated approver, and the prediction I wrote down before I ran it
 
+> **CORRECTION, 2026-08-26 — every number in this section was measured before generator g140, and
+> g140 moved them.** #64 decoupled the generator's RNG streams so that perturbing one parameter stops
+> shifting every unrelated draw, which is a strictly better world and a *different* one. I am leaving
+> the section exactly as written rather than editing the figures in place, because the point of it is
+> that five predictions were graded against what I actually saw at the time, and rewriting the numbers
+> would quietly convert a graded prediction into a retrofitted one. The grades all stand — the
+> directions and the sign of every effect survived g140 — but if you are going to quote a figure, quote
+> the g140 re-measurement from the sweep's control row instead. What changed:
+>
+> | claim | as written (pre-g140) | g140 control |
+> |---|---|---|
+> | mean paired incremental vs B3 | +₹78,530 | **+₹58,483** |
+> | worlds where Rebound beats B3 | 4 of 5 | **3 of 5** |
+> | pooled incremental ratio vs B3 | 1.93x | **1.87x** |
+> | pooled incremental ratio vs B2 | 0.79x (a loss) | **0.71x** (a bigger loss) |
+> | B2 messages inside quiet hours, per world | 549-578 | **550-596** |
+> | B2 contact-cap breaches, per world | 966-1040 | **989-1057** |
+> | Rebound grants / denials over 5 worlds | 38 / 21 | **40 / 21** (34.4% refused) |
+> | Rebound cases still frozen at the horizon | 2, 0, 2, 0, 0 | **0, 0, 1, 0, 0** |
+>
+> The sign count falling from 4-of-5 to 3-of-5 is the correction that matters and it is a real
+> weakening of the claim, so it is stated first in the table and repeated in the sweep write-up below.
+> Reproduce the right-hand column with `npm run sweep-report` — it re-prints from
+> `docs/evidence/sweep-2026-08-26/rows/baseline.json`, which is the run those figures come from.
+
+
 ### Pre-registered, before a single line of the approver existed
 
 The approval gate freezes real money. Measured across five worlds it holds about 72% of Rebound's
@@ -3181,3 +3207,338 @@ merchant would have received anyway. Rebound gives up the largest absolute deduc
 Rs 74,519, a tenth of its gross — because a meaningful slice of what it recovers, the customer was
 going to pay regardless. That is the least flattering number in this section and it is the one most
 worth computing, because almost no submission computes it at all.
+
+
+## Day 8/9 — #64, the bug that would have made the whole sweep meaningless
+
+This one has to be written up before #58, because #58 could not have been trusted without it and every
+figure in this log measured before it is void.
+
+The generator created **one RNG stream outside the event loop**, and all 600 events drew from it in
+sequence. That is the natural way to write a generator. It also silently couples every case to every
+case before it, because the loop body is full of conditional draws:
+
+```js
+if (trueRootCause === 'ISSUER_DOWNTIME') { ...rng.bool(0.8)... }
+if (payerType === DISPUTING) { ...rng.float(0.4, 0.85)... }
+if (selfRecovers) { ...rng.float(earliestDelay, selfHi)... }
+```
+
+How many numbers case *i* consumes depends on how case *i* turned out — and therefore on the parameters.
+So changing one probability changes every subsequent case's draws for **everything**: its amount, its
+customer, its rail, its cause.
+
+### The measurement that proved it, and why it was impossible
+
+Sweeping nothing but `selfRecoveryRate` moved **total portfolio exposure by 12.6%** — ₹9,30,035 at 0x
+down to ₹8,12,762 at 2x, on the day-7 world.
+
+That figure cannot be real. Self-recovery is a *latent*: whether a customer would have paid unprompted
+cannot change how much money was recorded as at risk. Exposure is the sum of the amounts on the failure
+records, fixed before any policy or any latent exists. **A 12.6% move there is arithmetically impossible,
+which is exactly why it was worth chasing** — an impossible number is a gift, because it cannot be argued
+away as a small modelling effect.
+
+And it is precisely the kind of confound that would have destroyed #58. A sensitivity row that says
+"scaling self-recovery by 2x costs the agent ₹X" would have been reporting a **repriced portfolio**
+attributed to the assumption under test. Every row in a 26-row sweep would have carried the same defect,
+the table would have looked busy and interesting, and not one row would have measured what its label said.
+
+### The fix, and why it is structural rather than a rule
+
+One RNG stream **per event**, keyed on the event's identity:
+
+```js
+const rng = makeRng(deriveSeed(seed, `event:${eventId}`));
+```
+
+A conditional draw added anywhere in that loop tomorrow now cannot reach another case. That matters more
+than the arithmetic: `deriveSeed`'s own docblock already prescribed exactly this discipline ("adding one
+extra random call would shift every downstream number and silently invalidate a comparison"), and the
+generator already applied it one line wide — drawing the self-recovery coin unconditionally to protect
+the stream. **The rule was written down, understood, and applied in the one place I had already been
+bitten, and it still failed everywhere else.** A rule that has to be remembered at every future edit is a
+rule that will be broken; per-event streams make the guarantee a property of the structure.
+
+`test/generator.test.js` pins the invariance, and it now holds exactly:
+
+    selfRecoveryRate x0     exposure Rs 43,87,699    delta 0.0000%
+    selfRecoveryRate x0.7   exposure Rs 43,87,699    delta 0.0000%
+    selfRecoveryRate x1.3   exposure Rs 43,87,699    delta 0.0000%
+    selfRecoveryRate x2     exposure Rs 43,87,699    delta 0.0000%
+
+Zero to four decimal places, not "small". A latent perturbation moves no recorded rupee.
+
+### One piece of honesty about the key
+
+The stream is keyed on `eventId` rather than on the loop index `i`. `eventId` is *derived* from `i`, so
+today the two are the same function of position and **no test can distinguish them** — I tried to write
+one and could not. It is a naming choice, not a behavioural one. It is kept because the identity becomes
+the meaningful key the moment event generation stops being a simple indexed loop: a filter, a shuffle, or
+per-customer generation would all break the index and leave the id correct. Stated as defence in depth
+rather than dressed up as a tested property.
+
+### What it cost
+
+Generator version went to g120 (and later g130, g140 for #65/#66 and #68). **Every number measured on
+g100 or g110 is void**, which is most of the Day 7 and early Day 8 figures. The five-arm headline had to
+be re-measured, and when it was, the sign count against the fixed ladder fell from 4 of 5 to 3 of 5. That
+fall is the honest cost of fixing this: the old, better-looking figure was measured in a world where
+perturbing one parameter repriced the portfolio.
+
+`batchIdFor` folds `GENERATOR_VERSION` into every batch id, so a figure from the old world cannot be
+mistaken for a figure from this one.
+
+## Day 8/9 — #58, the assumption sensitivity sweep: 26 worlds, two wiring bugs, one flip, and the mechanism I was wrong about
+
+`describeAssumptions()` returns `measured: false` for every price in this project. The failed-retry
+penalty, the patience unit, the human-review cost, the three contribution margins, the ₹2 EV floor —
+all stated, none measured. The five-arm headline sits on top of that stack, so the only question worth
+asking is not "is the number right" but **"does the ranking survive being wrong about the numbers"**.
+
+`src/eval/cli/sweep.js` runs 26 rows. Each row is one full five-arm paired comparison — five worlds,
+80 held-out cases, 21 cycles x 12h — with one thing changed. About 20 minutes end to end. The rows and
+their reasons live in `src/eval/perturbations.js`; the artefacts are committed under
+`docs/evidence/sweep-2026-08-26/`, and `npm run sweep-report` re-prints the whole table from them in
+under a second, so nothing quoted below requires a reader to spend the 20 minutes to check it.
+
+### The rule I wrote into the runner before running it
+
+**The sweep is not allowed to select anything.** Rows print in catalogue order, never sorted by
+favourability, and the verdict per row comes from a `VERDICT` constant fixed above the code:
+
+    primary:   beats the fixed ladder — >= 3 of 5 paired worlds AND pooled incremental ratio > 1
+    secondary: versus the aggressive baseline — which the control LOSES at 0.71x
+
+Requiring both a majority sign count *and* a pooled ratio is stricter than either alone: at n=5 one
+lucky world can carry a pooled figure, and a 3-of-5 count with a pooled ratio below 1 means the wins
+were small and the losses were large. Neither half on its own is a claim I would make out loud.
+
+Two more rules that exist to stop the sweep flattering itself:
+
+**A crashed row is loud and is not counted.** The natural summary is "the ranking held in N of 25
+worlds". If a crashed row were silently dropped, N would fall and the denominator would fall with it,
+so the *ratio* would improve every time something broke. A sweep that gets more reassuring as it
+malfunctions is worse than no sweep.
+
+**A guardrail counter is not a data point.** A perturbed price may legitimately change how much money
+the agent recovers. It may not produce a message inside quiet hours or a breach of the contact cap.
+Any row with a non-empty `invariantFailures` prints as DEFECT, because the finding in that case is
+about my code and not about the world.
+
+### The control row reproduces the headline, which is the only reason the other 25 mean anything
+
+    pooled incremental vs B3   1.8728x
+    mean paired difference     +Rs 58,483
+    sign count                 3 of 5 worlds
+    actions                    1,379 (688 retries + 691 messages) vs B3's 1,610
+    pooled incremental vs B2   0.7136x  — still a loss, still reported
+
+Identical to the g140 five-arm run on all four figures. If the control had drifted, the sweep harness
+would be changing the result by observing it and every row below would be uninterpretable.
+
+**26 rows requested, 26 completed, 0 crashed, 0 invariant defects.** Of the 25 non-control rows, the
+primary verdict matched the control in **24** and flipped in **1**.
+
+### Bug one: the row most able to embarrass this project was a silent no-op
+
+`self-recovery-x1.3` came back **byte-identical to the control** — same actions, same recovered paise,
+same self-recovered paise. On the row perturbing the one assumption whose own `basis` field says it is
+load-bearing. I nearly read that as robustness.
+
+`willSelfRecover` and `selfRecoverAt` are **generation-time latents**. `generateBatch` draws them from
+`params.selfRecoveryRate`; at run time `checkSelfRecovery` only reads the latent back:
+
+```js
+if (!latent.willSelfRecover || !latent.selfRecoverAt) return false;
+```
+
+So perturbing the run-time assumption set moved what the response model *believes* about unprompted
+payment and left the world's actual self-recoverers exactly where they were. A run-time override cannot
+reach a latent that was already drawn.
+
+The fix is structural rather than per-row: `resolvePerturbation` compares the resolved assumption table
+against the baseline and **derives** `generatorOverrides.selfRecoveryRate` whenever it moved. A per-row
+flag would have fixed the two explicit rows and left the same hole in all three joint draws and in
+`stale-model`, which perturb self-recovery through `perturbAssumptions` — four more rows that would have
+looked complete and measured nothing.
+
+This is the trap in one line: **a perturbation of a latent has to be applied where the latent is drawn,
+not where it is read.** `test/perturbations.test.js` now asserts, for every row that moves the
+assumption, that the generator override exists *and equals it term by term* — because a world whose
+self-recovery rate disagrees with the response model's is a third experiment nobody asked for.
+
+### Bug two: withholding the overrides from a stale model made the world unperturbed too
+
+`stale-model` is the row where the world moves and the model is deliberately *not* refitted — robustness
+to a **miscalibrated** model rather than sensitivity to an assumption's value. It is the harder test and
+the closest to deployment.
+
+`run.js` had:
+
+```js
+overrides: perturbation.refit ? perturbation.generatorOverrides : {}
+```
+
+which withholds the overrides from the whole world when `refit` is false, not just from the model. So
+`stale-model` ran an unperturbed world with a model fitted on an unperturbed world: nothing moved and
+the model was correct about it. A measurement of nothing, printed as robustness. It now reads:
+
+```js
+overrides: perturbation.generatorOverrides,   // the WORLD always gets them
+allowStaleTrain: !perturbation.refit,         // the MODEL does not always get to see them
+```
+
+`allowStaleTrain` is a named argument on `buildWorld` rather than a relaxed guard, because from inside
+`buildWorld` a stale model is indistinguishable from the bug — it is either the experiment or a missing
+argument, and only the caller knows which. Making the caller say so puts `refit: false` in the run's
+JSON next to the row's numbers, where a reader can see it.
+
+The guard it opts out of is worth stating on its own. `buildWorld` refuses a TRAIN batch that was not
+built with the overrides it is handed, by reference equality. Without it, a row that passed its
+overrides to `buildWorld` but forgot them in `fitRecoveryScorer` would reuse the baseline batch, return
+an unperturbed world, print the perturbation's name in the header, and report "no effect" — and the
+honest-sounding reading of that row is "this assumption does not matter", a claim about the world
+arrived at from a missing argument.
+
+### Bug three: my own table hid the movement it was built to show
+
+`retry-penalty-x0` moved Rebound from 1,379 actions to 1,475 with **identical recovered money to the
+paise** — and printed `holds`, indistinguishable from a dead row. Twelve rows were in that state.
+
+So each row now carries a **fingerprint**: attempts, retries, failed retries, messages, recovered, net,
+incremental, self-recovered, stopped cases, approvals requested. `movedTerms()` diffs it against the
+control, the verdict column prints `NO-OP -- SUSPECT WIRING` when every term matches, and a findings
+section lists the rows that *changed what the agent did without changing what it recovered* — which is
+a result, not a null. Verdict precedence is defect > no-op > flip, because all three are statements
+about whether a row can be read at all and have to be settled before its money can be.
+
+Only two rows are allowed to print a no-op quietly: `channels-x0.7` and `channels-x1.3`, which
+pre-register it in the catalogue because channel prices are 1-4 paise against amounts in the thousands
+of rupees and cannot move an argmax. A test pins that list to exactly those two, so a future no-op
+cannot be excused after the fact.
+
+Three bugs, and all three shared one shape: **each of them made a row look more robust than it was.**
+That is the thirteenth time in this log that a defect flattered the headline metric, which is the
+argument for the fingerprint over "read the table carefully".
+
+### The flip: the conclusion rests on the cause mix
+
+One row flipped the primary verdict:
+
+    cause-mix-do-not-honour-x3    2 of 5 worlds, pooled 1.75x, mean paired +Rs 50,488    FLIP -> fails
+
+Pooled money still favours Rebound. The majority-of-worlds condition fails, and by the rule fixed before
+the run, failing either half is failing. `DO_NOT_HONOUR` is the vague-but-retryable cause the diagnosis
+taxonomy handles worst, and tripling its share is enough to cost us the sign count.
+
+**So the assumption this project's conclusion actually rests on is the composition of failure causes,
+not any of its prices.** The tilt is applied to TRAIN and TEST together and the model is refitted, so
+this is not staleness — the agent learns the tilted world and still loses the majority. The companion
+row is the reason I believe the mechanism: `cause-mix-insufficient-funds-x3`, a cause where *waiting* is
+the right answer, holds at 3 of 5 and 1.85x. Gaining where timing pays and losing where diagnosis is
+weak is a sharper and less flattering claim than "the agent is smarter".
+
+### The finding that demotes my own favourite mechanism
+
+Restrict attention to the 15 rows that change only what the policy charges itself — the cost, margin
+and policy families, all of which leave the generator parameters untouched, so the world and the model
+are identical and the *only* difference is a price:
+
+    retries across those 15 rows      447 - 788        a 1.76x range
+    gross recovered                   Rs 6,98,301 - Rs 7,01,973     0.53%
+    incremental recovered             Rs 6,23,782 - Rs 6,27,454     0.59%
+
+The failed-retry penalty specifically, holding everything else fixed:
+
+    penalty x0     788 retries (768 failed)    Rs 7,01,973 recovered
+    penalty x0.7   716 retries (697 failed)    Rs 7,01,973 recovered
+    baseline       688 retries (669 failed)    Rs 7,01,973 recovered
+    penalty x1.3   664 retries (645 failed)    Rs 7,01,973 recovered
+    penalty x2     608 retries (589 failed)    Rs 7,01,973 recovered
+
+The catalogue pre-registered exactly this test: *"if the ranking is UNCHANGED here, the honest reading
+is not 'robust' — it is that the penalty was never doing the work I claim it does."* So:
+
+**The failed-retry penalty does not drive the recovered money. It suppresses wasted retries.** Free, the
+agent fires 100 more retries and collects the same rupees; at double price it fires 80 fewer and still
+collects them. Retry success in the control is **2.54% for B1, 2.54% for B2, 2.60% for B3 and 2.76% for Rebound** — 19
+successes from 688 attempts — so no arm has found a better card to re-charge; Rebound has simply found
+fewer bad ones to try. **The money comes from contacting the right customer, not from re-charging the card**, and
+the penalty's real job is keeping the agent from burning goodwill on a 2.5% shot.
+
+One honest caveat on that paragraph. At `penalty x0` the run records 20 successful retries against the
+control's 19, and gross recovery is identical to the paise — so the marginal successful retry collected
+a case some other action would have collected anyway inside the 10-day horizon. That is the reading the
+aggregates support; confirming it needs a per-case diff of which action closed which case, and I have not
+run that diff, so it is stated as the likely mechanism rather than as a measurement.
+
+`ev-bar-k2` is the row where the trade is visible: 447 retries, 319 fewer actions than the control, and
+₹6,23,782 incremental against ₹6,27,454 — **a 23% cut in actions for a 0.6% cut in incremental money.**
+That is a trade a merchant might legitimately want, and it is reported as a curve rather than chosen,
+because `k=1` was fixed by argument (EV/σ(EV) = p/σ(p), amount-invariant) before this sweep existed.
+
+Two rows moved `netPaise` and nothing else at all: `human-review-x0.7` and `human-review-x1.3`.
+Escalation decisions are insensitive to a ±30% review price at this n — the guardrail decides whether a
+human is needed, and the price of that human never enters the comparison that matters.
+
+### Where the ±30% band is too narrow to be a test
+
+`self-recovery-x1.3` was described in my own catalogue as "the row most able to embarrass this project".
+Once wired correctly it moves **2 cases out of 400**, ₹790 of exposure: 22 self-recoverers become 24.
+
+The reason is structural and I should have seen it before writing the label. Measured on the five TEST
+worlds: **173 of the 400 cases (43.3%) have already outlasted the 12-day self-recovery window**, so their
+posterior probability of paying unprompted is exactly zero — the whole window elapsed and they did not
+pay. A further 13.8% are `NEVER_PAYING`, whose multiplier is 0.0. Multiplying a propensity by 1.3 cannot
+reach either group, so the ±30% band can only nudge the small remainder: 5.5% of the batch self-recovers
+at baseline and 6.0% at +30%.
+
+I corrected the catalogue text and added `self-recovery-x2`, labelled **outside the declared band, a
+stress test not a sensitivity row**, which moves 22 to 38 (5.5% to 9.5%) and still holds at 3 of 5 and
+2.00x. Downward, `self-recovery-x0.7` moves 22 to 12 and is the row that does the real work in this
+family — it holds at 3 of 5 but drops the pooled ratio to 1.71x, the largest single-assumption fall in
+the whole sweep outside the joint draws.
+
+The general point, stated against myself: **a row that holds at ±30% is not evidence that ±30% is the
+right band.** The band is a declared assumption too, and on this parameter it was too narrow to be a
+test at all until I checked how many cases it could physically move.
+
+### The joint rows, and the number I am not allowed to quote
+
+    joint-1      5/5   7.41x   +Rs 56,524     vsB2 1.09x
+    joint-2      3/5   1.01x   +Rs 880        vsB2 1.08x
+    joint-3      5/5   2.55x   +Rs 1,50,130   vsB2 1.11x
+    stale-model  4/5   7.08x   +Rs 53,566     vsB2 1.04x   (model NOT refitted)
+
+`perturbAssumptions` moves every assumption at once, each inside its declared range, so a joint row is a
+plausible alternative world rather than a single edited constant. Three draws is not a distribution and
+is not offered as one; it is three named worlds.
+
+**`joint-2` is the row to read.** It collapses the edge to 1.01x and +₹880 — a world inside the declared
+ranges where Rebound and the fixed ladder are indistinguishable. That is the honest ceiling on how
+strongly the headline can be stated.
+
+And the number I pre-registered as untouchable: **all three joint rows flip the vsB2 comparison into a
+win, 1.08x to 1.11x.** The control loses that comparison at 0.71x. By the rule fixed in `VERDICT` before
+any row ran, a win found by searching 25 worlds is a searched win and not a result, so it is printed in
+its own findings section under exactly that heading. I am writing it down here because it is the single
+most tempting figure in the whole sweep and the least honest, and the only defence I have against quoting
+it later is having said so first.
+
+`stale-model` shares `joint-1`'s rng seed, so the pair is the same world differing in exactly one
+variable: whether the model was allowed to see it. It holds at 4 of 5 and 7.08x against joint-1's 5 of 5
+and 7.41x — a model fitted in the wrong world loses one world's worth of edge and keeps the rest. A test
+pins the shared seed, because if the two seeds ever drift apart the pair silently becomes two unrelated
+rows and the one variable it isolates disappears.
+
+### What this section is not
+
+It cannot tell anyone the true failed-retry penalty. It measures which assumptions the conclusion rests
+on, so a reader who disagrees with one of my prices knows immediately whether their disagreement matters.
+On the current evidence, disagreeing about the prices does not change the ranking; disagreeing about the
+cause mix does.
+
+Suite at **642 tests, 0 failures, 20 suites**, including 18 new tests in
+`test/perturbations.test.js` whose entire purpose is that a silent no-op in a sweep row manufactures
+confidence, and 3 new tests in `test/harness.test.js` for the override guard and its one named opt-out.

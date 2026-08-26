@@ -15,6 +15,8 @@
     "doctor": "node src/razorpay/cli/doctor.js",
     "api": "node src/api/server.js",
     "eval": "node src/eval/cli/run.js",
+    "sweep": "node src/eval/cli/sweep.js",
+    "sweep-report": "node src/eval/cli/sweep.js --report-only --out=docs/evidence/sweep-2026-08-26/rows",
     "test": "node --test test/*.test.js",
     "check": "npm run test && npm run verify-sim && npm run diagnose-report && npm run model-report && npm run decide-report && npm run orchestrate-report && npm run eval-smoke",
     "diagnose-report": "node src/eval/cli/diagnose-report.js",
@@ -28,7 +30,8 @@
     "scripts": [
       "`decide-report` and `orchestrate-report` answer two different questions and both are in `check` on purpose. `decide-report` prints what the policy EXPECTS to recover — arithmetic over its own estimates, nothing executed. `orchestrate-report` runs the loop against the simulated gateway across several cycles and prints what a receipt actually said was captured. A regression that leaves the EV maths intact but breaks execution, scheduling or the guardrail ledger is invisible to the first and loud in the second.",
       "`select-arm` is deliberately NOT part of `check`. It runs a 20-world sweep and takes about 90 seconds, and `check` has to stay fast enough to run on every change. The plumbing and the statistics are covered by test/armSelection.test.js, which runs the same procedure on three tiny worlds in under two seconds; the full sweep is a deliberate act you perform when choosing which model the decision engine is built on, not a per-commit check.",
-      "`select-arm` is also the only command permitted to decide that choice. `model-report` scores the reserved held-out batch and is for final reporting only — reading an arm choice out of it is what went wrong on Day 5."
+      "`select-arm` is also the only command permitted to decide that choice. `model-report` scores the reserved held-out batch and is for final reporting only — reading an arm choice out of it is what went wrong on Day 5.",
+      "`sweep` is not in `check` either, and for a stronger reason than slowness: it runs 26 five-seed five-arm evals and takes about 20 minutes. `sweep-report` re-prints the whole table in under a second from the row JSONs committed under docs/evidence/, so a reader can check every figure quoted in ENGINEERING_LOG.md without spending 20 minutes to reproduce them — and can then spend the 20 minutes if they want to confirm the JSONs are what the code actually produces."
     ],
     "dependencies": [
       "Deliberately short. `razorpay` was removed once the client was hand-rolled over fetch (see src/razorpay/httpClient.js for the reasoning), and `dotenv` once src/core/env.js replaced it.",

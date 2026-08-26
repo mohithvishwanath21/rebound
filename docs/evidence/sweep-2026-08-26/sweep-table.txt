@@ -1,0 +1,87 @@
+
+  ASSUMPTION SENSITIVITY SWEEP
+  26 row(s), seeds 1,2,3,4,5, 80 cases, TEST split, k=1
+  Nothing here selects a policy. Rows print in catalogue order, never sorted by result.
+
+  PERTURBATION                    FAM     RFT  SIGN  POOLED  MEAN PAIRED   ACTIONS     vsB2    VERDICT
+  ----------------------------------------------------------------------------------------------------------
+  baseline                        none    y    3/5   1.87x   +Rs.58,483    1379        0.71x   CONTROL
+  retry-penalty-x0                cost    y    3/5   1.87x   +Rs.58,483    1475 (+96)  0.71x   holds
+  retry-penalty-x0.7              cost    y    3/5   1.87x   +Rs.58,483    1405 (+26)  0.71x   holds
+  retry-penalty-x1.3              cost    y    3/5   1.87x   +Rs.58,483    1356 (-23)  0.71x   holds
+  retry-penalty-x2                cost    y    3/5   1.87x   +Rs.58,483    1302 (-77)  0.71x   holds
+  patience-x0.7                   cost    y    3/5   1.87x   +Rs.58,483    1420 (+41)  0.71x   holds
+  patience-x1.3                   cost    y    3/5   1.86x   +Rs.57,749    1346 (-33)  0.71x   holds
+  human-review-x0.7               cost    y    3/5   1.87x   +Rs.58,483    1379        0.71x   holds
+  human-review-x1.3               cost    y    3/5   1.87x   +Rs.58,483    1379        0.71x   holds
+  channels-x0.7                   cost    y    3/5   1.87x   +Rs.58,483    1382 (+3)   0.71x   holds
+  channels-x1.3                   cost    y    3/5   1.87x   +Rs.58,483    1377 (-2)   0.71x   holds
+  margins-x0.7                    margin  y    3/5   1.86x   +Rs.57,749    1285 (-94)  0.71x   holds
+  margins-x1.3-clamped            margin  y    3/5   1.87x   +Rs.58,483    1429 (+50)  0.71x   holds
+  self-recovery-x0.7              world   y    3/5   1.71x   +Rs.59,712    1391 (+12)  0.75x   holds
+  self-recovery-x1.3              world   y    3/5   1.88x   +Rs.58,597    1374 (-5)   0.71x   holds
+  self-recovery-x2                world   y    3/5   2.00x   +Rs.61,834    1356 (-23)  0.72x   holds
+  grant-rate-x0.7                 world   y    3/5   2.03x   +Rs.57,846    1352 (-27)  0.91x   holds
+  grant-rate-x1.3-clamped         world   y    3/5   1.98x   +Rs.65,911    1412 (+33)  0.69x   holds
+  cause-mix-do-not-honour-x3      world   y    2/5   1.75x   +Rs.50,488    1420 (+41)  0.67x   FLIP -> fails
+  cause-mix-insufficient-funds-x3 world   y    3/5   1.85x   +Rs.57,210    1389 (+10)  0.71x   holds
+  ev-bar-k0                       policy  y    3/5   1.87x   +Rs.58,483    1443 (+64)  0.71x   holds
+  ev-bar-k2                       policy  y    3/5   1.86x   +Rs.57,749    1060 (-319) 0.71x   holds
+  joint-1                         joint   y    5/5   7.41x   +Rs.56,524    1109 (-270) 1.09x   holds
+  joint-2                         joint   y    3/5   1.01x   +Rs.880       1192 (-187) 1.08x   holds
+  joint-3                         joint   y    5/5   2.55x   +Rs.1,50,130  1164 (-215) 1.11x   holds
+  stale-model                     skew    N    4/5   7.08x   +Rs.53,566    1478 (+99)  1.04x   holds
+  ----------------------------------------------------------------------------------------------------------
+
+  SIGN     worlds where Rebound beat the fixed ladder on incremental recovery, out of n.
+  POOLED   pooled incremental ratio vs B3_FIXED_LADDER. MEAN PAIRED = mean paired difference.
+  ACTIONS  every action Rebound attempted — retries PLUS messages — and the change against
+            the control. In the control that is 688 retries and 691 messages. A row can move
+            this a long way while leaving the money untouched; that is a result, not a null.
+  vsB2     pooled incremental ratio vs B2_AGGRESSIVE. The control LOSES this comparison. It is
+           shown so a row which flips it cannot be quoted without the other 24 rows beside it.
+  RFT      was the model refitted in the perturbed world. N means the row measures robustness
+           to a miscalibrated model — a different question, and one that cannot attribute a flip.
+  NO-OP    every term of the fingerprint equals the control, to the paise. Read as a suspected
+           wiring bug, not as robustness, unless the catalogue pre-registered the null.
+
+  Actions, control row: Rebound 1379 (688 retries + 691 messages) vs fixed ladder 1610.
+
+  WHAT THIS SWEEP FOUND
+  --------------------------------------------------------------------------------------------------------
+  Rows requested: 26. Completed: 26. Crashed: 0. With invariant defects: 0.
+  Of the 25 clean completed rows excluding the control, the primary verdict
+  (beats fixed ladder (>=3/5 worlds AND pooled ratio > 1))
+  matched the control in 24 and flipped in 1.
+
+  These rows changed what the agent DID without changing what it recovered. That is a real
+  finding and the table would have hidden it behind an unchanged money column:
+    retry-penalty-x0  attempts +96, same recovery. Moved: attempts, retries, failedRetries, messages, netPaise, stoppedCases
+    retry-penalty-x0.7  attempts +26, same recovery. Moved: attempts, retries, failedRetries, messages, netPaise, stoppedCases
+    retry-penalty-x1.3  attempts -23, same recovery. Moved: attempts, retries, failedRetries, messages, netPaise
+    retry-penalty-x2  attempts -77, same recovery. Moved: attempts, retries, failedRetries, messages, netPaise
+    patience-x0.7  attempts +41, same recovery. Moved: attempts, retries, failedRetries, messages, netPaise, stoppedCases
+    human-review-x0.7  attempts +0, same recovery. Moved: netPaise
+    human-review-x1.3  attempts +0, same recovery. Moved: netPaise
+    channels-x0.7  attempts +3, same recovery. Moved: attempts, messages, netPaise, stoppedCases
+    channels-x1.3  attempts -2, same recovery. Moved: attempts, messages, netPaise
+    margins-x1.3-clamped  attempts +50, same recovery. Moved: attempts, retries, failedRetries, messages, netPaise, stoppedCases
+    self-recovery-x1.3  attempts -5, same recovery. Moved: attempts, retries, failedRetries, messages, netPaise, selfRecoveredPaise, stoppedCases
+    ev-bar-k0  attempts +64, same recovery. Moved: attempts, retries, failedRetries, messages, netPaise, stoppedCases
+
+  THE RANKING FLIPPED HERE. These are the assumptions the conclusion actually rests on:
+    cause-mix-do-not-honour-x3  (world)  2/5 signs, 1.75x, +Rs.50,488
+      DO_NOT_HONOUR 3x more likely, model refitted
+
+  The comparison against the AGGRESSIVE baseline also moved in these rows. The control loses
+  that comparison, so a row where it wins is a world found by searching, not a result:
+    joint-1  4/5 signs, 1.09x
+    joint-2  4/5 signs, 1.08x
+    joint-3  3/5 signs, 1.11x
+
+  A row that shows no movement is only informative if it COULD have moved. The catalogue
+  states an expectation for each row in its `why` field, and two of them pre-register a null:
+  channels-x0.7 / x1.3 (channel prices are 1-4 paise against amounts in the thousands of
+  rupees, so they cannot move an argmax) and that null is a confirmed prediction. Any OTHER
+  row printing no movement should be read as a possible wiring bug first and a finding second.
+

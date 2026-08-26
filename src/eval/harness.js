@@ -83,10 +83,35 @@ export const runIdFor = ({ seed, split }) => `run_${seed}_${split}`;
  * prices, or the commands describe three different systems. Always on TRAIN, even when the run is on
  * TEST — fitting on the split being scored would make every lookup cell well-supported and the
  * support asymmetry the stopping rules depend on impossible to observe.
+ *
+ * =================================================================================================
+ * `assumptions` AND `overrides` EXIST FOR THE #58 SWEEP, AND WHAT THEY MEAN IS A CHOICE, NOT A DETAIL
+ * =================================================================================================
+ * A sweep row perturbs the world. The question is whether the agent's MODEL is refitted in the
+ * perturbed world or kept as it was, and the two answers measure different things:
+ *
+ *   REFIT (what these parameters make possible, and the sweep's default). The perturbation is a
+ *   different world and the agent learned in it. The row then isolates one cause: does the RANKING of
+ *   policies depend on this assumption? That is the sensitivity question #58 was written to answer.
+ *
+ *   DO NOT REFIT. The agent's beliefs come from the baseline world and it is deployed into the
+ *   perturbed one. The row now measures robustness to MISCALIBRATION — a real and separate question,
+ *   and a strictly harder one — but it conflates the assumption's effect with the size of the
+ *   train/serve gap it opens, so it cannot attribute a ranking flip to either.
+ *
+ * Both are worth knowing, so the catalogue in `perturbations.js` carries mostly the first kind and one
+ * explicit `stale-model` row of the second, labelled as such. What it must never do is run the second
+ * kind while describing the first: "the ranking survived our assumptions" and "the ranking survived
+ * being wrong about our assumptions" are different claims and the stronger-sounding one is the weaker.
  */
-export async function fitRecoveryScorer({ seed, startAt }) {
-  const train = generateBatch({ seed, split: 'TRAIN', now: startAt });
-  const trainData = await buildDataset({ events: train.events, latents: train.latents, seed });
+export async function fitRecoveryScorer({ seed, startAt, assumptions = undefined, overrides = {} }) {
+  const train = generateBatch({ seed, split: 'TRAIN', now: startAt, overrides });
+  const trainData = await buildDataset({
+    events: train.events,
+    latents: train.latents,
+    seed,
+    ...(assumptions ? { assumptions } : {}),
+  });
   const { fit, valid: cal } = splitByEvent(trainData.rows, { fraction: 0.8, seed });
 
   const lookup = fitLookupTable(fit, { key: (r) => `${r.diagnosedCause}|${r.actionKind}`, minCount: 10 });
@@ -117,14 +142,62 @@ export async function fitRecoveryScorer({ seed, startAt }) {
  * between arms cannot come from the diagnosis layer, because both arms are handed the identical
  * diagnosis object. Diagnosis is not part of the policy under test.
  */
-export async function buildWorld({ seed, split = 'TRAIN', count = 80, startAt, train = null }) {
+export async function buildWorld({
+  seed,
+  split = 'TRAIN',
+  count = 80,
+  startAt,
+  train = null,
+  overrides = {},
+  allowStaleTrain = false,
+}) {
   const target =
     split === 'TRAIN'
-      ? (train ?? generateBatch({ seed, split: 'TRAIN', now: startAt }))
-      : generateBatch({ seed, split: 'TEST', now: startAt });
+      ? (train ?? generateBatch({ seed, split: 'TRAIN', now: startAt, overrides }))
+      : generateBatch({ seed, split: 'TEST', now: startAt, overrides });
 
   const events = target.events.slice(0, count);
   const eventIds = new Set(events.map((e) => e.eventId));
+
+  /**
+   * A PASSED-IN TRAIN BATCH SILENTLY BYPASSES `overrides`, SO IT IS CHECKED RATHER THAN TRUSTED.
+   *
+   * `run.js` fits the model and builds the world from the same batch, so `train` arrives already
+   * built — with whatever overrides the caller gave `fitRecoveryScorer`. If a sweep row passed its
+   * generator overrides here but forgot them there, the line above would reuse the BASELINE batch and
+   * this function would return an unperturbed world while the run's header printed the perturbation's
+   * name. Nothing would fail. The row would report "no effect", and the honest reading of that row is
+   * "this assumption does not matter" — a claim about the world, arrived at from a missing argument.
+   *
+   * Reference equality is the right test here precisely because it is strict: `perturbations.js`
+   * builds each perturbed table exactly once and hands the same object to both calls, so identity
+   * holds when the wiring is right and fails loudly the moment someone rebuilds one of the two.
+   */
+  /**
+   * THE ONE CASE WHERE THE MISMATCH IS THE POINT, AND WHY IT NEEDS A NAME.
+   *
+   * `allowStaleTrain` exists for the `stale-model` row: the world moves and the model is deliberately
+   * NOT refitted, which is robustness to a miscalibrated model rather than sensitivity to an
+   * assumption. That is a real experiment and it requires exactly the state the guard above rejects.
+   *
+   * It is a named argument rather than a relaxation of the guard because the two situations are
+   * indistinguishable from inside this function — a stale model is either the experiment or the bug,
+   * and only the caller knows which. Making the caller say so moves the claim into the run's JSON
+   * (`perturbation.refit: false`), where a reader can see it, instead of leaving it as a silent
+   * property of a code path.
+   */
+  if (train && !allowStaleTrain && Object.keys(overrides).length > 0) {
+    for (const key of Object.keys(overrides)) {
+      if (train.params?.[key] !== overrides[key]) {
+        throw new Error(
+          `buildWorld: overrides.${key} was supplied, but the TRAIN batch passed in was not built ` +
+            `with it. The model would be fitted on the baseline world while the run claims to be ` +
+            `perturbed. Pass the same overrides object to fitRecoveryScorer(), or pass ` +
+            `allowStaleTrain: true if the skew is the experiment.`
+        );
+      }
+    }
+  }
 
   const latentById = new Map(
     target.latents.filter((l) => eventIds.has(l.eventId)).map((l) => [l.eventId, l])

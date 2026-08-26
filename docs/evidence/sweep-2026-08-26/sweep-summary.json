@@ -1,0 +1,1276 @@
+{
+  "verdictDefinition": {
+    "primary": {
+      "versus": "vsB3",
+      "label": "beats fixed ladder (>=3/5 worlds AND pooled ratio > 1)"
+    },
+    "secondary": {
+      "versus": "vsB2",
+      "label": "vs aggressive (control LOSES this at 0.71x)"
+    }
+  },
+  "flags": {
+    "only": null,
+    "seeds": "1,2,3,4,5",
+    "count": 80,
+    "split": "TEST",
+    "evBarSigmaK": 1,
+    "out": "docs/evidence/sweep-2026-08-26/rows",
+    "workers": 2,
+    "reportOnly": true,
+    "reuse": false,
+    "list": false,
+    "json": true
+  },
+  "rows": [
+    {
+      "id": "baseline",
+      "family": "none",
+      "label": "no perturbation",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1379,
+        "retries": 688,
+        "failedRetries": 669,
+        "messages": 691,
+        "recoveredPaise": 70197300,
+        "netPaise": 63019730,
+        "incrementalPaise": 62745400,
+        "selfRecoveredPaise": 35911500,
+        "stoppedCases": 198,
+        "approvalsRequested": 100
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 5848346,
+        "sdPaise": 18861324,
+        "minPaise": -8303400,
+        "maxPaise": 38698729,
+        "pooledIncrementalRatio": 1.8727917904876752,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.7136289812611744,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1379,
+        "b3": 1610,
+        "ratio": 0.8565217391304348
+      },
+      "messages": {
+        "rebound": 691,
+        "b3": 688
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "retry-penalty-x0",
+      "family": "cost",
+      "label": "failed-retry penalty = 0",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1475,
+        "retries": 788,
+        "failedRetries": 768,
+        "messages": 687,
+        "recoveredPaise": 70197300,
+        "netPaise": 63154050,
+        "incrementalPaise": 62745400,
+        "selfRecoveredPaise": 35911500,
+        "stoppedCases": 196,
+        "approvalsRequested": 100
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 5848346,
+        "sdPaise": 18861324,
+        "minPaise": -8303400,
+        "maxPaise": 38698729,
+        "pooledIncrementalRatio": 1.8727917904876752,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.7136289812611744,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1475,
+        "b3": 1610,
+        "ratio": 0.9161490683229814
+      },
+      "messages": {
+        "rebound": 687,
+        "b3": 688
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "retry-penalty-x0.7",
+      "family": "cost",
+      "label": "failed-retry penalty -30%",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1405,
+        "retries": 716,
+        "failedRetries": 697,
+        "messages": 689,
+        "recoveredPaise": 70197300,
+        "netPaise": 63056000,
+        "incrementalPaise": 62745400,
+        "selfRecoveredPaise": 35911500,
+        "stoppedCases": 196,
+        "approvalsRequested": 100
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 5848346,
+        "sdPaise": 18861324,
+        "minPaise": -8303400,
+        "maxPaise": 38698729,
+        "pooledIncrementalRatio": 1.8727917904876752,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.7136289812611744,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1405,
+        "b3": 1610,
+        "ratio": 0.8726708074534162
+      },
+      "messages": {
+        "rebound": 689,
+        "b3": 688
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "retry-penalty-x1.3",
+      "family": "cost",
+      "label": "failed-retry penalty +30%",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1356,
+        "retries": 664,
+        "failedRetries": 645,
+        "messages": 692,
+        "recoveredPaise": 70197300,
+        "netPaise": 62985405,
+        "incrementalPaise": 62745400,
+        "selfRecoveredPaise": 35911500,
+        "stoppedCases": 198,
+        "approvalsRequested": 100
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 5848346,
+        "sdPaise": 18861324,
+        "minPaise": -8303400,
+        "maxPaise": 38698729,
+        "pooledIncrementalRatio": 1.8727917904876752,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.7136289812611744,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1356,
+        "b3": 1610,
+        "ratio": 0.8422360248447205
+      },
+      "messages": {
+        "rebound": 692,
+        "b3": 688
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "retry-penalty-x2",
+      "family": "cost",
+      "label": "failed-retry penalty x2",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1302,
+        "retries": 608,
+        "failedRetries": 589,
+        "messages": 694,
+        "recoveredPaise": 70197300,
+        "netPaise": 62917025,
+        "incrementalPaise": 62745400,
+        "selfRecoveredPaise": 35911500,
+        "stoppedCases": 198,
+        "approvalsRequested": 100
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 5848346,
+        "sdPaise": 18861324,
+        "minPaise": -8303400,
+        "maxPaise": 38698729,
+        "pooledIncrementalRatio": 1.8727917904876752,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.7136289812611744,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1302,
+        "b3": 1610,
+        "ratio": 0.808695652173913
+      },
+      "messages": {
+        "rebound": 694,
+        "b3": 688
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "patience-x0.7",
+      "family": "cost",
+      "label": "patience price -30%",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1420,
+        "retries": 686,
+        "failedRetries": 667,
+        "messages": 734,
+        "recoveredPaise": 70197300,
+        "netPaise": 63054275,
+        "incrementalPaise": 62745400,
+        "selfRecoveredPaise": 35911500,
+        "stoppedCases": 175,
+        "approvalsRequested": 100
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 5848346,
+        "sdPaise": 18861324,
+        "minPaise": -8303400,
+        "maxPaise": 38698729,
+        "pooledIncrementalRatio": 1.8727917904876752,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.7136289812611744,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1420,
+        "b3": 1610,
+        "ratio": 0.8819875776397516
+      },
+      "messages": {
+        "rebound": 734,
+        "b3": 688
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "patience-x1.3",
+      "family": "cost",
+      "label": "patience price +30%",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1346,
+        "retries": 692,
+        "failedRetries": 673,
+        "messages": 654,
+        "recoveredPaise": 69830100,
+        "netPaise": 62871945,
+        "incrementalPaise": 62378200,
+        "selfRecoveredPaise": 35911500,
+        "stoppedCases": 213,
+        "approvalsRequested": 100
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 5774906,
+        "sdPaise": 18930788,
+        "minPaise": -8670600,
+        "maxPaise": 38698729,
+        "pooledIncrementalRatio": 1.86183179747676,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.7094526661541051,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1346,
+        "b3": 1610,
+        "ratio": 0.8360248447204969
+      },
+      "messages": {
+        "rebound": 654,
+        "b3": 688
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "human-review-x0.7",
+      "family": "cost",
+      "label": "human review -30%",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1379,
+        "retries": 688,
+        "failedRetries": 669,
+        "messages": 691,
+        "recoveredPaise": 70197300,
+        "netPaise": 63073730,
+        "incrementalPaise": 62745400,
+        "selfRecoveredPaise": 35911500,
+        "stoppedCases": 198,
+        "approvalsRequested": 100
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 5848346,
+        "sdPaise": 18861324,
+        "minPaise": -8303400,
+        "maxPaise": 38698729,
+        "pooledIncrementalRatio": 1.8727917904876752,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.7136289812611744,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1379,
+        "b3": 1610,
+        "ratio": 0.8565217391304348
+      },
+      "messages": {
+        "rebound": 691,
+        "b3": 688
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "human-review-x1.3",
+      "family": "cost",
+      "label": "human review +30%",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1379,
+        "retries": 688,
+        "failedRetries": 669,
+        "messages": 691,
+        "recoveredPaise": 70197300,
+        "netPaise": 62965730,
+        "incrementalPaise": 62745400,
+        "selfRecoveredPaise": 35911500,
+        "stoppedCases": 198,
+        "approvalsRequested": 100
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 5848346,
+        "sdPaise": 18861324,
+        "minPaise": -8303400,
+        "maxPaise": 38698729,
+        "pooledIncrementalRatio": 1.8727917904876752,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.7136289812611744,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1379,
+        "b3": 1610,
+        "ratio": 0.8565217391304348
+      },
+      "messages": {
+        "rebound": 691,
+        "b3": 688
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "channels-x0.7",
+      "family": "cost",
+      "label": "all channel prices -30%",
+      "refit": true,
+      "expectNoMovement": true,
+      "fingerprint": {
+        "attempts": 1382,
+        "retries": 688,
+        "failedRetries": 669,
+        "messages": 694,
+        "recoveredPaise": 70197300,
+        "netPaise": 63025677,
+        "incrementalPaise": 62745400,
+        "selfRecoveredPaise": 35911500,
+        "stoppedCases": 197,
+        "approvalsRequested": 100
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 5848346,
+        "sdPaise": 18861324,
+        "minPaise": -8303400,
+        "maxPaise": 38698729,
+        "pooledIncrementalRatio": 1.8727917904876752,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.7136289812611744,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1382,
+        "b3": 1610,
+        "ratio": 0.8583850931677018
+      },
+      "messages": {
+        "rebound": 694,
+        "b3": 688
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "channels-x1.3",
+      "family": "cost",
+      "label": "all channel prices +30%",
+      "refit": true,
+      "expectNoMovement": true,
+      "fingerprint": {
+        "attempts": 1377,
+        "retries": 688,
+        "failedRetries": 669,
+        "messages": 689,
+        "recoveredPaise": 70197300,
+        "netPaise": 63013103,
+        "incrementalPaise": 62745400,
+        "selfRecoveredPaise": 35911500,
+        "stoppedCases": 198,
+        "approvalsRequested": 100
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 5848346,
+        "sdPaise": 18861324,
+        "minPaise": -8303400,
+        "maxPaise": 38698729,
+        "pooledIncrementalRatio": 1.8727917904876752,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.7136289812611744,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1377,
+        "b3": 1610,
+        "ratio": 0.8552795031055901
+      },
+      "messages": {
+        "rebound": 689,
+        "b3": 688
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "margins-x0.7",
+      "family": "margin",
+      "label": "contribution margins -30%",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1285,
+        "retries": 651,
+        "failedRetries": 632,
+        "messages": 634,
+        "recoveredPaise": 69830100,
+        "netPaise": 43915273,
+        "incrementalPaise": 62378200,
+        "selfRecoveredPaise": 35911500,
+        "stoppedCases": 218,
+        "approvalsRequested": 100
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 5774906,
+        "sdPaise": 18930788,
+        "minPaise": -8670600,
+        "maxPaise": 38698729,
+        "pooledIncrementalRatio": 1.86183179747676,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.7094526661541051,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1285,
+        "b3": 1610,
+        "ratio": 0.7981366459627329
+      },
+      "messages": {
+        "rebound": 634,
+        "b3": 688
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "margins-x1.3-clamped",
+      "family": "margin",
+      "label": "contribution margins +30%, clamped at 1.0",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1429,
+        "retries": 704,
+        "failedRetries": 685,
+        "messages": 725,
+        "recoveredPaise": 70197300,
+        "netPaise": 66050301,
+        "incrementalPaise": 62745400,
+        "selfRecoveredPaise": 35911500,
+        "stoppedCases": 182,
+        "approvalsRequested": 100
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 5848346,
+        "sdPaise": 18861324,
+        "minPaise": -8303400,
+        "maxPaise": 38698729,
+        "pooledIncrementalRatio": 1.8727917904876752,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.7136289812611744,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1429,
+        "b3": 1610,
+        "ratio": 0.8875776397515528
+      },
+      "messages": {
+        "rebound": 725,
+        "b3": 688
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "self-recovery-x0.7",
+      "family": "world",
+      "label": "self-recovery propensity -30%",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1391,
+        "retries": 691,
+        "failedRetries": 672,
+        "messages": 700,
+        "recoveredPaise": 72658500,
+        "netPaise": 65472835,
+        "incrementalPaise": 71640700,
+        "selfRecoveredPaise": 30102100,
+        "stoppedCases": 199,
+        "approvalsRequested": 100
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 5971186,
+        "sdPaise": 18242014,
+        "minPaise": -8374200,
+        "maxPaise": 37392729,
+        "pooledIncrementalRatio": 1.714516994720397,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.7487468750261286,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1391,
+        "b3": 1618,
+        "ratio": 0.8597033374536465
+      },
+      "messages": {
+        "rebound": 700,
+        "b3": 694
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "self-recovery-x1.3",
+      "family": "world",
+      "label": "self-recovery propensity +30%",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1374,
+        "retries": 685,
+        "failedRetries": 666,
+        "messages": 689,
+        "recoveredPaise": 70197300,
+        "netPaise": 63020780,
+        "incrementalPaise": 62745400,
+        "selfRecoveredPaise": 35990500,
+        "stoppedCases": 196,
+        "approvalsRequested": 100
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 5859746,
+        "sdPaise": 18853483,
+        "minPaise": -8303400,
+        "maxPaise": 38698729,
+        "pooledIncrementalRatio": 1.8759834125195898,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.7136289812611744,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1374,
+        "b3": 1605,
+        "ratio": 0.8560747663551402
+      },
+      "messages": {
+        "rebound": 689,
+        "b3": 684
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "self-recovery-x2",
+      "family": "world",
+      "label": "self-recovery propensity x2 — OUTSIDE the declared band, a stress test not a sensitivity row",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1356,
+        "retries": 680,
+        "failedRetries": 661,
+        "messages": 676,
+        "recoveredPaise": 70197300,
+        "netPaise": 63022195,
+        "incrementalPaise": 61774200,
+        "selfRecoveredPaise": 55764100,
+        "stoppedCases": 192,
+        "approvalsRequested": 100
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 6183366,
+        "sdPaise": 18169587,
+        "minPaise": -8118200,
+        "maxPaise": 37868929,
+        "pooledIncrementalRatio": 2.001926865383315,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.7213586825151601,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1356,
+        "b3": 1593,
+        "ratio": 0.8512241054613936
+      },
+      "messages": {
+        "rebound": 676,
+        "b3": 675
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "grant-rate-x0.7",
+      "family": "world",
+      "label": "approver grant rate -30%",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1352,
+        "retries": 674,
+        "failedRetries": 655,
+        "messages": 678,
+        "recoveredPaise": 64329500,
+        "netPaise": 58647705,
+        "incrementalPaise": 56877600,
+        "selfRecoveredPaise": 35911500,
+        "stoppedCases": 208,
+        "approvalsRequested": 94
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 5784586,
+        "sdPaise": 18722540,
+        "minPaise": -8303400,
+        "maxPaise": 38379929,
+        "pooledIncrementalRatio": 2.0346367159892527,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "3/5",
+        "pooledIncrementalRatio": 0.9055298878865938,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1352,
+        "b3": 1595,
+        "ratio": 0.8476489028213167
+      },
+      "messages": {
+        "rebound": 678,
+        "b3": 683
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "grant-rate-x1.3-clamped",
+      "family": "world",
+      "label": "approver grant rate +30%, clamped at 0.9",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1412,
+        "retries": 705,
+        "failedRetries": 686,
+        "messages": 707,
+        "recoveredPaise": 73911100,
+        "netPaise": 66671765,
+        "incrementalPaise": 66459200,
+        "selfRecoveredPaise": 35911500,
+        "stoppedCases": 186,
+        "approvalsRequested": 110
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 6591106,
+        "sdPaise": 18667669,
+        "minPaise": -8303400,
+        "maxPaise": 38698729,
+        "pooledIncrementalRatio": 1.9836393450735592,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.6868067648077052,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1412,
+        "b3": 1637,
+        "ratio": 0.8625534514355528
+      },
+      "messages": {
+        "rebound": 707,
+        "b3": 697
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "cause-mix-do-not-honour-x3",
+      "family": "world",
+      "label": "DO_NOT_HONOUR 3x more likely, model refitted",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1420,
+        "retries": 734,
+        "failedRetries": 713,
+        "messages": 686,
+        "recoveredPaise": 66199600,
+        "netPaise": 59469540,
+        "incrementalPaise": 58747700,
+        "selfRecoveredPaise": 35911500,
+        "stoppedCases": 187,
+        "approvalsRequested": 102
+      },
+      "primary": {
+        "signs": "2/5",
+        "positive": 2,
+        "n": 5,
+        "meanIncrementalPaise": 5048806,
+        "sdPaise": 19164644,
+        "minPaise": -8835400,
+        "maxPaise": 38707929,
+        "pooledIncrementalRatio": 1.7534705376016855,
+        "holds": false
+      },
+      "secondary": {
+        "signs": "1/5",
+        "pooledIncrementalRatio": 0.6681615114803172,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1420,
+        "b3": 1629,
+        "ratio": 0.8717004297114794
+      },
+      "messages": {
+        "rebound": 686,
+        "b3": 687
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "cause-mix-insufficient-funds-x3",
+      "family": "world",
+      "label": "INSUFFICIENT_FUNDS 3x more likely, model refitted",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1389,
+        "retries": 692,
+        "failedRetries": 676,
+        "messages": 697,
+        "recoveredPaise": 69651500,
+        "netPaise": 62778610,
+        "incrementalPaise": 62108500,
+        "selfRecoveredPaise": 35820400,
+        "stoppedCases": 202,
+        "approvalsRequested": 103
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 5720966,
+        "sdPaise": 18974315,
+        "minPaise": -8792900,
+        "maxPaise": 38698729,
+        "pooledIncrementalRatio": 1.8537819333290373,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.7063852582445829,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1389,
+        "b3": 1610,
+        "ratio": 0.8627329192546583
+      },
+      "messages": {
+        "rebound": 697,
+        "b3": 688
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "ev-bar-k0",
+      "family": "policy",
+      "label": "EV bar k = 0 (the flat ₹2 floor)",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1443,
+        "retries": 724,
+        "failedRetries": 705,
+        "messages": 719,
+        "recoveredPaise": 70197300,
+        "netPaise": 63022030,
+        "incrementalPaise": 62745400,
+        "selfRecoveredPaise": 35911500,
+        "stoppedCases": 179,
+        "approvalsRequested": 100
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 5848346,
+        "sdPaise": 18861324,
+        "minPaise": -8303400,
+        "maxPaise": 38698729,
+        "pooledIncrementalRatio": 1.8727917904876752,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.7136289812611744,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1443,
+        "b3": 1610,
+        "ratio": 0.8962732919254658
+      },
+      "messages": {
+        "rebound": 719,
+        "b3": 688
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 0,
+      "evBarSigmaKSource": "perturbation"
+    },
+    {
+      "id": "ev-bar-k2",
+      "family": "policy",
+      "label": "EV bar k = 2",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1060,
+        "retries": 447,
+        "failedRetries": 428,
+        "messages": 613,
+        "recoveredPaise": 69830100,
+        "netPaise": 62938710,
+        "incrementalPaise": 62378200,
+        "selfRecoveredPaise": 35911500,
+        "stoppedCases": 223,
+        "approvalsRequested": 94
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 5774906,
+        "sdPaise": 18930788,
+        "minPaise": -8670600,
+        "maxPaise": 38698729,
+        "pooledIncrementalRatio": 1.86183179747676,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 0.7094526661541051,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1060,
+        "b3": 1610,
+        "ratio": 0.6583850931677019
+      },
+      "messages": {
+        "rebound": 613,
+        "b3": 688
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 2,
+      "evBarSigmaKSource": "perturbation"
+    },
+    {
+      "id": "joint-1",
+      "family": "joint",
+      "label": "every assumption drawn from its declared range (draw 1)",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1109,
+        "retries": 431,
+        "failedRetries": 413,
+        "messages": 678,
+        "recoveredPaise": 34935000,
+        "netPaise": 30169895,
+        "incrementalPaise": 32668800,
+        "selfRecoveredPaise": 39609200,
+        "stoppedCases": 144,
+        "approvalsRequested": 111
+      },
+      "primary": {
+        "signs": "5/5",
+        "positive": 5,
+        "n": 5,
+        "meanIncrementalPaise": 5652386,
+        "sdPaise": 5710384,
+        "minPaise": 729400,
+        "maxPaise": 14751500,
+        "pooledIncrementalRatio": 7.413150963574836,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "4/5",
+        "pooledIncrementalRatio": 1.0887894229903983,
+        "wins": true
+      },
+      "attempts": {
+        "rebound": 1109,
+        "b3": 1708,
+        "ratio": 0.6492974238875878
+      },
+      "messages": {
+        "rebound": 678,
+        "b3": 737
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "joint-2",
+      "family": "joint",
+      "label": "every assumption drawn from its declared range (draw 2)",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1192,
+        "retries": 588,
+        "failedRetries": 556,
+        "messages": 604,
+        "recoveredPaise": 55669300,
+        "netPaise": 46704705,
+        "incrementalPaise": 48292800,
+        "selfRecoveredPaise": 29783000,
+        "stoppedCases": 185,
+        "approvalsRequested": 100
+      },
+      "primary": {
+        "signs": "3/5",
+        "positive": 3,
+        "n": 5,
+        "meanIncrementalPaise": 88026,
+        "sdPaise": 8866045,
+        "minPaise": -13937400,
+        "maxPaise": 9903200,
+        "pooledIncrementalRatio": 1.009197626991297,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "4/5",
+        "pooledIncrementalRatio": 1.07646252438005,
+        "wins": true
+      },
+      "attempts": {
+        "rebound": 1192,
+        "b3": 1574,
+        "ratio": 0.7573062261753494
+      },
+      "messages": {
+        "rebound": 604,
+        "b3": 667
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "joint-3",
+      "family": "joint",
+      "label": "every assumption drawn from its declared range (draw 3)",
+      "refit": true,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1164,
+        "retries": 586,
+        "failedRetries": 556,
+        "messages": 578,
+        "recoveredPaise": 134352382,
+        "netPaise": 126523614,
+        "incrementalPaise": 123400382,
+        "selfRecoveredPaise": 39377700,
+        "stoppedCases": 194,
+        "approvalsRequested": 86
+      },
+      "primary": {
+        "signs": "5/5",
+        "positive": 5,
+        "n": 5,
+        "meanIncrementalPaise": 15013020,
+        "sdPaise": 13000727,
+        "minPaise": 2943800,
+        "maxPaise": 31433100,
+        "pooledIncrementalRatio": 2.553008421467366,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "3/5",
+        "pooledIncrementalRatio": 1.1090735398143856,
+        "wins": true
+      },
+      "attempts": {
+        "rebound": 1164,
+        "b3": 1603,
+        "ratio": 0.72613849033063
+      },
+      "messages": {
+        "rebound": 578,
+        "b3": 681
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    },
+    {
+      "id": "stale-model",
+      "family": "skew",
+      "label": "world perturbed jointly, model NOT refitted",
+      "refit": false,
+      "expectNoMovement": false,
+      "fingerprint": {
+        "attempts": 1478,
+        "retries": 747,
+        "failedRetries": 743,
+        "messages": 731,
+        "recoveredPaise": 31189900,
+        "netPaise": 29389385,
+        "incrementalPaise": 31189900,
+        "selfRecoveredPaise": 41875400,
+        "stoppedCases": 206,
+        "approvalsRequested": 102
+      },
+      "primary": {
+        "signs": "4/5",
+        "positive": 4,
+        "n": 5,
+        "meanIncrementalPaise": 5356606,
+        "sdPaise": 9035489,
+        "minPaise": -342000,
+        "maxPaise": 21339729,
+        "pooledIncrementalRatio": 7.077561380852764,
+        "holds": true
+      },
+      "secondary": {
+        "signs": "2/5",
+        "pooledIncrementalRatio": 1.039500478258406,
+        "wins": false
+      },
+      "attempts": {
+        "rebound": 1478,
+        "b3": 1708,
+        "ratio": 0.8653395784543325
+      },
+      "messages": {
+        "rebound": 731,
+        "b3": 737
+      },
+      "invariantFailures": [],
+      "breakerWarnings": [],
+      "evBarSigmaK": 1,
+      "evBarSigmaKSource": "flag"
+    }
+  ],
+  "baselineId": "baseline"
+}

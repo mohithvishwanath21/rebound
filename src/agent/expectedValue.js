@@ -70,22 +70,25 @@ import { ActionKind, MONEY_MOVING, CUSTOMER_CONTACTING, ACTION_META } from '../c
  * look like the most valuable thing in the batch and it would be chased first. Defaulting low
  * makes it look least valuable and it gets chased last, which is the correct way to be wrong
  * about something you do not recognise.
+ *
+ * `margins` is injectable so the #58 sensitivity sweep can perturb the table. It defaults to the
+ * production constant, so every existing caller is unaffected.
  */
-export function marginFor(lossType) {
-  const known = CONTRIBUTION_MARGIN[lossType];
+export function marginFor(lossType, margins = CONTRIBUTION_MARGIN) {
+  const known = margins[lossType];
   if (typeof known === 'number') return known;
-  return Math.min(...Object.values(CONTRIBUTION_MARGIN));
+  return Math.min(...Object.values(margins));
 }
 
 /** Per-message cost for the action's channel, in paise. Non-contacting actions cost nothing. */
-export function channelCostPaise(action) {
+export function channelCostPaise(action, costs = COSTS) {
   if (!CUSTOMER_CONTACTING.has(action?.kind)) return 0;
-  const c = COSTS.channel[action?.channel];
+  const c = costs.channel[action?.channel];
   if (typeof c !== 'number') {
     // A contacting action with no channel is a construction bug, not a free message. Priced at
     // the most expensive channel so the mistake shows up as an action that never wins rather
     // than as an action that always wins.
-    return Math.max(...Object.values(COSTS.channel));
+    return Math.max(...Object.values(costs.channel));
   }
   return c;
 }
@@ -102,8 +105,25 @@ export function channelCostPaise(action) {
  * if the total were rounded independently of the parts it would not equal their sum, and a
  * reviewer checking the arithmetic by hand would find a one-paise discrepancy and reasonably
  * conclude the whole record was untrustworthy.
+ *
+ * `costs` AND `margins` ARE BOTH INJECTABLE, AND THE FIRST VERSION OF THIS SIGNATURE WAS A TRAP.
+ * `costs` was already a parameter, but the body called `channelCostPaise(action)` without passing it
+ * through, so injecting a perturbed cost table changed the human-review, failed-retry and patience
+ * terms and silently left the CHANNEL price at the module default. Nothing failed; the perturbation
+ * was just quietly partial. Found while building the #58 sweep, and it matters because the sweep's
+ * output would have been "channel costs make no difference" — a null result that looks like a finding
+ * and is actually a wiring bug. A partially-applied override is worse than no override, because the
+ * former produces a number and the latter produces an error.
  */
-export function expectedValue({ p, amountPaise, lossType, action, touchesUsed = 0, costs = COSTS } = {}) {
+export function expectedValue({
+  p,
+  amountPaise,
+  lossType,
+  action,
+  touchesUsed = 0,
+  costs = COSTS,
+  margins = CONTRIBUTION_MARGIN,
+} = {}) {
   if (!Number.isFinite(p) || p < 0 || p > 1) {
     throw new RangeError(`expectedValue: p must be a probability in [0,1], got ${p}`);
   }
@@ -114,7 +134,7 @@ export function expectedValue({ p, amountPaise, lossType, action, touchesUsed = 
 
   const kind = action.kind;
   const meta = ACTION_META[kind] ?? {};
-  const margin = marginFor(lossType);
+  const margin = marginFor(lossType, margins);
 
   // Actions that cannot recover money have a structurally zero gross, not a small one. Writing
   // it as `p x amount x margin` for STOP_PERMANENT would depend on the caller having passed
@@ -142,7 +162,7 @@ export function expectedValue({ p, amountPaise, lossType, action, touchesUsed = 
   const canRecover = MONEY_MOVING.has(kind) || CUSTOMER_CONTACTING.has(kind);
   const grossPaise = canRecover ? Math.round(p * amountPaise * margin) : 0;
 
-  const channel = channelCostPaise(action);
+  const channel = channelCostPaise(action, costs);
   const humanReview = kind === ActionKind.ESCALATE_HUMAN ? costs.humanReviewPaise : 0;
 
   // The externality of a decline: issuer and network scrutiny that raises the cost of every
@@ -264,7 +284,7 @@ export function actionThresholdPaise(policy = POLICY, evidence = null) {
  * the point — these are stated assumptions, and the sensitivity sweep on Days 8-9 exists
  * because none of them is a measurement.
  */
-export function describeAssumptions(costs = COSTS, policy = POLICY) {
+export function describeAssumptions(costs = COSTS, policy = POLICY, margins = CONTRIBUTION_MARGIN) {
   return [
     { name: 'channel.EMAIL', paise: costs.channel.EMAIL, measured: false, basis: 'token price so that "email forever" is still bounded by something' },
     { name: 'channel.SMS', paise: costs.channel.SMS, measured: false, basis: 'rough Indian transactional messaging rate' },
@@ -274,7 +294,7 @@ export function describeAssumptions(costs = COSTS, policy = POLICY) {
     { name: 'failedRetryPenaltyPaise', paise: costs.failedRetryPenaltyPaise, measured: false, basis: 'issuer/network scrutiny externality. THE LEAST DEFENSIBLE NUMBER HERE; widest sensitivity range' },
     { name: 'patienceUnitPaise', paise: costs.patienceUnitPaise, measured: false, basis: 'shadow price of one unit of customer goodwill; charged convexly' },
     { name: 'minEvToActPaise', paise: policy.minEvToActPaise, measured: false, basis: 'above zero because the probability estimate has a standard error' },
-    ...Object.entries(CONTRIBUTION_MARGIN).map(([k, v]) => ({
+    ...Object.entries(margins).map(([k, v]) => ({
       name: `margin.${k}`,
       paise: null,
       fraction: v,

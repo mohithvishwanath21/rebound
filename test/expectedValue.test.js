@@ -481,6 +481,73 @@ test('costs are injectable, so the sensitivity sweep can perturb them without mu
   assert.equal(COSTS.failedRetryPenaltyPaise, 200, 'the real config must be untouched');
 });
 
+/**
+ * THE TEST ABOVE PASSED WHILE THE INJECTION WAS HALF-BROKEN, WHICH IS WHY THIS ONE EXISTS.
+ *
+ * `expectedValue` took a `costs` argument and used it for the failed-retry, human-review and patience
+ * terms — the three the test above happens to check — and then called `channelCostPaise(action)`
+ * WITHOUT passing it, so the channel price silently stayed at the module default under any override.
+ * Nothing threw. The perturbation was just quietly partial.
+ *
+ * The consequence would have been a null result that reads as a finding: the #58 sweep's channel-cost
+ * row would have printed "no effect on the ranking", and the honest reading of that row is "channel
+ * prices do not matter", which is a claim about the policy. It would in fact have been a claim about a
+ * missing argument. A partially-applied override is worse than no override, because the former produces
+ * a number and the latter produces an error.
+ *
+ * So every injectable table now gets a test that perturbs it and asserts the specific component it is
+ * supposed to move. One test per term, not one test per parameter.
+ */
+test('injecting a cost table moves the CHANNEL price too, not only the terms tested above', () => {
+  const dear = { ...COSTS, channel: { ...COSTS.channel, SMS: 999 } };
+  const r = expectedValue({
+    p: 0.2,
+    amountPaise: 100_000,
+    lossType: 'FAILED_PAYMENT',
+    action: { kind: ActionKind.SEND_LINK, channel: Channel.SMS },
+    costs: dear,
+  });
+  assert.equal(r.components.channelPaise, 999, 'the injected channel price must reach the arithmetic');
+  assert.notEqual(COSTS.channel.SMS, 999, 'and the real config must be untouched');
+
+  // The no-channel fallback prices at the most expensive channel on the INJECTED table, not the real one.
+  const orphan = expectedValue({
+    p: 0.2,
+    amountPaise: 100_000,
+    lossType: 'FAILED_PAYMENT',
+    action: { kind: ActionKind.SEND_LINK },
+    costs: dear,
+  });
+  assert.equal(orphan.components.channelPaise, 999, 'max() must be taken over the injected table');
+});
+
+test('injecting a margin table moves the gross, and marginFor reads the injected minimum', () => {
+  const generous = { ...CONTRIBUTION_MARGIN, FAILED_PAYMENT: 1.0 };
+  const r = expectedValue({
+    p: 0.5,
+    amountPaise: 100_000,
+    lossType: 'FAILED_PAYMENT',
+    action: { kind: ActionKind.RETRY_NOW },
+    margins: generous,
+  });
+  assert.equal(r.components.margin, 1.0);
+  assert.equal(r.grossPaise, 50_000, '0.5 x 100000 x 1.0');
+  assert.notEqual(CONTRIBUTION_MARGIN.FAILED_PAYMENT, 1.0, 'the real config must be untouched');
+
+  /**
+   * The unrecognised-loss-type fallback must be the minimum of the INJECTED table. If it read the
+   * module constant, a sweep that raised every margin would leave the fallback low and the sweep would
+   * report a spurious effect concentrated entirely in unknown loss types — a bug that looks like a
+   * finding about robustness to unfamiliar inventory.
+   */
+  const scaled = Object.fromEntries(Object.entries(CONTRIBUTION_MARGIN).map(([k, v]) => [k, v * 2]));
+  assert.equal(
+    marginFor('NO_SUCH_LOSS_TYPE', scaled),
+    Math.min(...Object.values(scaled)),
+    'the fallback is the injected minimum, not the production one'
+  );
+});
+
 // =============================================================================================
 // THE SUPPORT-SCALED BAR (#52) — every number below is hand-computed
 // =============================================================================================

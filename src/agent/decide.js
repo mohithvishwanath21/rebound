@@ -43,7 +43,7 @@
  * Execution, scheduling, and the contact ledger are Day 7.
  */
 
-import { GUARDRAILS, POLICY, POLICY_ARMS } from '../core/config.js';
+import { GUARDRAILS, POLICY, POLICY_ARMS, COSTS, CONTRIBUTION_MARGIN } from '../core/config.js';
 import { ActionKind, actionSignature, enumerateCandidateActions, MONEY_MOVING, CUSTOMER_CONTACTING, Channel } from '../core/actions.js';
 import { formatINR } from '../core/money.js';
 import { checkGuardrails, normaliseCaseState, Verdict } from './guardrails.js';
@@ -381,6 +381,19 @@ export function decideForCase({
       lossType: caseState.lossType,
       action,
       touchesUsed: caseState.touchesUsed,
+      /**
+       * Read from `config` rather than from the module import so the #58 sensitivity sweep can perturb
+       * a price and have the perturbation actually reach the arithmetic. `?? COSTS` keeps every
+       * existing caller — including every test that passes only `{ GUARDRAILS, POLICY }` — on the
+       * production table.
+       *
+       * The scorer in `src/eval/metrics.js` MUST be handed the same two tables. A sweep that perturbs
+       * what the policy believes a retry costs but scores the outcome at the unperturbed price is not
+       * measuring sensitivity, it is measuring a policy that has been told a lie — a different and
+       * much narrower question.
+       */
+      costs: config.COSTS ?? COSTS,
+      margins: config.CONTRIBUTION_MARGIN ?? CONTRIBUTION_MARGIN,
     });
 
     // Re-run the approval checks now that a belief exists: APR_UNSUPPORTED_BELIEF cannot be
@@ -543,7 +556,10 @@ export function decideForCase({
     customerId: caseState.customerId,
     amountPaise: caseState.amountPaise,
     lossType: caseState.lossType,
-    marginApplied: marginFor(caseState.lossType),
+    // Same table the EV arithmetic used. If the audit record printed the production margin while the
+    // decision was made on a perturbed one, the sweep's own audit trail would misreport the reason
+    // for its own decisions.
+    marginApplied: marginFor(caseState.lossType, config.CONTRIBUTION_MARGIN ?? CONTRIBUTION_MARGIN),
 
     diagnosis: diagnosis
       ? {

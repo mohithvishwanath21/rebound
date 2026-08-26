@@ -282,3 +282,67 @@ test('runArm defaults to the full HORIZON, not to a convenient small number', as
   );
   assert.ok(run.cycles.length <= HORIZON.cycles, 'a cycle summary per busy cycle, never more than the horizon');
 });
+
+// =============================================================================================
+// THE OVERRIDE GUARD — the difference between a perturbed world and a mislabelled one
+// =============================================================================================
+
+test('buildWorld refuses a TRAIN batch that was not built with the overrides it is handed', async () => {
+  /**
+   * `run.js` fits the model and builds the world from the same batch, so `train` arrives already
+   * built — with whatever overrides the caller gave `fitRecoveryScorer`. If a sweep row passed its
+   * generator overrides to one call and forgot them in the other, `buildWorld` would reuse the
+   * BASELINE batch and return an unperturbed world while the run's header printed the perturbation's
+   * name and its `why`.
+   *
+   * Nothing would crash. The row would report "no effect", and the honest-sounding reading of that row
+   * is "this assumption does not matter" — a claim about the world, arrived at from a missing argument.
+   * This is the guard that turns that into a stack trace, and the assertion on the message text is
+   * part of the test because the error has to tell whoever hits it which of the two calls to fix.
+   */
+  const overrides = { selfRecoveryRate: { FAILED_PAYMENT: 0.9, FAILED_SUBSCRIPTION: 0.9, OVERDUE_INVOICE: 0.9 } };
+  shared ??= await fitRecoveryScorer({ seed: SEED, startAt: START });
+
+  await assert.rejects(
+    () => buildWorld({ seed: SEED, split: 'TRAIN', count: 2, startAt: START, train: shared.train, overrides }),
+    (err) => {
+      assert.match(err.message, /overrides\.selfRecoveryRate was supplied/);
+      assert.match(err.message, /fitted on the baseline world while the run claims to be/);
+      assert.match(err.message, /allowStaleTrain/, 'the message must name the one legitimate way out');
+      return true;
+    }
+  );
+});
+
+test('allowStaleTrain lets the skew through, because for one row the skew IS the experiment', async () => {
+  /**
+   * `stale-model` deliberately moves the world and keeps a model fitted in the baseline world. That is
+   * robustness to a MISCALIBRATED model rather than sensitivity to an assumption's value, and it
+   * requires exactly the state the guard above rejects.
+   *
+   * It is a named argument rather than a relaxation of the guard because the two situations are
+   * indistinguishable from inside `buildWorld` — a stale model is either the experiment or the bug, and
+   * only the caller knows which. Making the caller say so puts the claim in the run's JSON, where a
+   * reader can see `refit: false` beside the row's numbers, instead of leaving it a silent property of
+   * a code path.
+   */
+  const overrides = { selfRecoveryRate: { FAILED_PAYMENT: 0.9, FAILED_SUBSCRIPTION: 0.9, OVERDUE_INVOICE: 0.9 } };
+  shared ??= await fitRecoveryScorer({ seed: SEED, startAt: START });
+
+  const w = await buildWorld({
+    seed: SEED, split: 'TRAIN', count: 2, startAt: START, train: shared.train, overrides, allowStaleTrain: true,
+  });
+  assert.equal(w.events.length, 2, 'the world must still build');
+  assert.equal(w.runId, runIdFor({ seed: SEED, split: 'TRAIN' }), 'and must still pair with the other arms');
+});
+
+test('the guard is silent when there are no overrides to disagree about', async () => {
+  /**
+   * The control row and every cost/margin/policy row pass no generator overrides at all, so the guard
+   * must not fire for them — a guard that fired on the baseline would be turned off within a day, and
+   * then the sweep's 24 world-perturbing rows would be unprotected.
+   */
+  shared ??= await fitRecoveryScorer({ seed: SEED, startAt: START });
+  const w = await buildWorld({ seed: SEED, split: 'TRAIN', count: 2, startAt: START, train: shared.train });
+  assert.equal(w.events.length, 2);
+});

@@ -78,6 +78,8 @@
  *   --arms=...         comma-separated subset, for debugging. Dropping B0 makes incremental unavailable.
  *   --now=...          ISO start instant. A fixed default, NOT the wall clock.
  *   --ev-bar-sigma-k=1 standard errors of headroom the EV bar demands. 0 = the old flat ₹2 bar.
+ *   --perturb=baseline one named alternative world from `src/eval/perturbations.js`. `--list-perturbations`
+ *                      prints the catalogue with the reason each row is expected to matter.
  *   --json             machine-readable, for the dashboard and for diffing runs
  *   --quiet            suppress progress lines
  */
@@ -85,8 +87,20 @@
 import { fitRecoveryScorer, buildWorld, runArm } from '../harness.js';
 import { scoreArm, compareWithinWorld, poolAcrossWorlds } from '../metrics.js';
 import { policyFor, describeArm } from '../baselines.js';
+import { resolvePerturbation, describePerturbations, PERTURBATION_IDS } from '../perturbations.js';
 import { GUARDRAILS, POLICY, POLICY_ARMS, HORIZON, describeHorizon } from '../../core/config.js';
 import { readFlags, asNumber } from './flags.js';
+
+/**
+ * `--list-perturbations` before anything else runs, so a reader can see what the sweep can ask without
+ * waiting 60 seconds for a comparison they did not want.
+ */
+if (process.argv.includes('--list-perturbations')) {
+  for (const p of describePerturbations()) {
+    process.stdout.write(`${p.id}\n  [${p.family}${p.refit ? '' : ', model NOT refitted'}] ${p.label}\n  ${p.why}\n\n`);
+  }
+  process.exit(0);
+}
 
 /**
  * A FIXED DEFAULT START INSTANT. Quiet hours, the retry gap and the case-age budget are all
@@ -108,6 +122,7 @@ const f = readFlags(
     arms: ALL_ARM_IDS.join(','),
     now: DEFAULT_NOW,
     'ev-bar-sigma-k': String(POLICY.evBarSigmaK ?? 0),
+    perturb: 'baseline',
   },
   ['json', 'quiet'],
   (raw) => {
@@ -124,6 +139,17 @@ const f = readFlags(
       if (!ALL_ARM_IDS.includes(a)) {
         throw new Error(`--arms contains unknown arm "${a}". Known: ${ALL_ARM_IDS.join(', ')}`);
       }
+    }
+
+    /**
+     * Validated HERE rather than left to `resolvePerturbation` below, so a typo fails before 60 seconds
+     * of computation rather than after. Same reasoning as the arm check above it.
+     */
+    if (!PERTURBATION_IDS.includes(String(raw.perturb))) {
+      throw new Error(
+        `--perturb=${raw.perturb} is not a known perturbation. Run --list-perturbations to see all ` +
+          `${PERTURBATION_IDS.length}.`
+      );
     }
 
     const cycles = asNumber(raw.cycles, 'cycles', { min: 1 });
@@ -184,7 +210,45 @@ const evalGuardrails = {
  * number. Every other policy value stays at its production setting; a CLI that let a reader tune the
  * policy until the table looked good would be a worse tool than one that could not be tuned at all.
  */
-const config = { GUARDRAILS: evalGuardrails, POLICY: { ...POLICY, evBarSigmaK: f.evBarSigmaK } };
+// =================================================================================================
+// THE PERTURBATION — `--perturb=baseline` by default, which changes nothing
+// =================================================================================================
+/**
+ * One named alternative world from `src/eval/perturbations.js`, resolved into the cost table, margin
+ * table, policy, response-model assumptions and generator overrides this run should use. #58's sweep
+ * is nothing more than this flag driven over every id in the catalogue, which is deliberate: each row
+ * of the sensitivity table is reproducible on its own by a reader who does not trust the sweep, as
+ *
+ *     node src/eval/cli/run.js --perturb=retry-penalty-x2 --json
+ *
+ * TWO THINGS THE FLAG DOES NOT DO, both of which it would be easy to let it do by accident.
+ *
+ * It does not accept a free-form `key=value`. An unknown id throws, because a mistyped perturbation is
+ * a no-op and a no-op prints "no effect", and "this assumption does not matter" arrived at from a typo
+ * is the most dangerous sentence this project could produce.
+ *
+ * It does not let `--perturb` and `--ev-bar-sigma-k` disagree silently. The `ev-bar-k*` rows set k
+ * through the perturbation, so the perturbation is applied LAST and wins; `evBarSigmaKSource` in the
+ * config block records which of the two supplied the value that actually applied. A run whose printed
+ * flags do not describe the policy it ran is not reproducible, however correct its arithmetic.
+ */
+const perturbation = resolvePerturbation(f.perturb);
+const kFromPerturbation = perturbation.POLICY.evBarSigmaK;
+const kFromFlag = f.evBarSigmaK;
+const evBarSigmaK = perturbation.POLICY === POLICY ? kFromFlag : kFromPerturbation;
+
+/**
+ * ONE config object, not two. An earlier draft kept the unperturbed `config` alongside a
+ * `perturbedConfig` and threaded whichever was in scope, which is precisely how a sweep ends up
+ * deciding with perturbed prices and scoring with production ones — the train/serve skew in the
+ * SCORER that `metrics.js` warns about. There is nothing here to pick the wrong one from.
+ */
+const config = {
+  GUARDRAILS: evalGuardrails,
+  POLICY: { ...POLICY, evBarSigmaK },
+  COSTS: perturbation.COSTS,
+  CONTRIBUTION_MARGIN: perturbation.CONTRIBUTION_MARGIN,
+};
 
 /** What the production caps would have been, printed beside the actuals. */
 const PROD_CAPS = { messages: GUARDRAILS.maxMessagesPerRun, retries: GUARDRAILS.maxRetriesPerRun };
@@ -201,12 +265,50 @@ for (const seed of f.seeds) {
    * because their models differ, which is not the question being asked. Always on TRAIN, even when the
    * run is on TEST — fitting on the split being scored would make every lookup cell well-supported and
    * the support asymmetry the stopping rules read impossible to observe.
+   *
+   * `perturbation.refit` decides whether the model is fitted IN the perturbed world or in the baseline
+   * one. True for every sensitivity row (the perturbation is a different world and the agent learned
+   * in it, so a ranking change is attributable to the assumption); false for the single `stale-model`
+   * row, which deliberately measures the harder and different question of robustness to being wrong.
+   * See the `fitRecoveryScorer` docblock — running the second while reporting the first would be
+   * claiming the stronger-sounding result and delivering the weaker one.
    */
   say(`seed ${seed}: fitting the recovery model on TRAIN`);
-  const { scoreAction, train } = await fitRecoveryScorer({ seed, startAt });
+  const { scoreAction, train } = await fitRecoveryScorer({
+    seed,
+    startAt,
+    ...(perturbation.refit
+      ? { assumptions: perturbation.assumptions, overrides: perturbation.generatorOverrides }
+      : {}),
+  });
 
   say(`seed ${seed}: building the ${f.split} world (${f.count} cases)`);
-  const world = await buildWorld({ seed, split: f.split, count: f.count, startAt, train });
+  const world = await buildWorld({
+    seed,
+    split: f.split,
+    count: f.count,
+    startAt,
+    train,
+    /**
+     * THE WORLD ALWAYS GETS THE OVERRIDES. The model does not always get to see them.
+     *
+     * An earlier version withheld generator overrides on a non-refit row, to avoid tripping the
+     * `buildWorld` guard that stops a model being fitted in the baseline world while the header claims
+     * a perturbed one. That was backwards: withholding them means the world is NOT perturbed either,
+     * so `stale-model` became a row where nothing moved and the model was correct about it — a
+     * measurement of nothing, printed as robustness.
+     *
+     * `allowStaleTrain` is the honest form. On a non-refit row the world moves, the model is fitted in
+     * the baseline world, and the mismatch is declared rather than avoided. That is the definition of
+     * the row: the price of a model that has not caught up with the world.
+     *
+     * The consequence for interpretation is in `perturbations.js`: a flip on a non-refit row cannot be
+     * attributed to the assumption, because the row moved two things at once — the world, and the size
+     * of the gap between the world and the model's belief about it.
+     */
+    overrides: perturbation.generatorOverrides,
+    allowStaleTrain: !perturbation.refit,
+  });
 
   const scored = [];
   for (const armId of f.arms) {
@@ -224,8 +326,17 @@ for (const seed of f.seeds) {
       cycles: f.cycles,
       stepHours: f.stepHours,
       config,
+      /**
+       * The WORLD's assumptions — the response model that decides whether an action actually recovers
+       * money, and the approver's SLA and grant rate. Passed on every row including `baseline`, where
+       * `resolvePerturbation` returns `materialiseAssumptions()` unchanged, so there is one code path
+       * rather than a perturbed one and a default one. `recoveryProbability` refuses to default its own
+       * assumption set for exactly this reason: a silent default would make every arm agree and the
+       * sweep would report robustness because nothing ever varied.
+       */
+      assumptions: perturbation.assumptions,
     });
-    scored.push(await scoreArm({ result, world }));
+    scored.push(await scoreArm({ result, world, config }));
   }
 
   perWorldScored.push(scored);
@@ -336,6 +447,30 @@ if (asJson) {
       startAt: startAt.toISOString(), arms: f.arms,
       productionRunCaps: PROD_CAPS,
       evalRunCaps: { messages: evalGuardrails.maxMessagesPerRun, retries: evalGuardrails.maxRetriesPerRun },
+      /**
+       * The perturbation, recorded in the artefact rather than left to the invocation that produced
+       * it. A sweep writes one JSON per row and a reader diffs them months later; a file that does not
+       * say which world it came from is a number without provenance, which is not a result.
+       *
+       * `evBarSigmaK` is the value that ACTUALLY applied, and `evBarSigmaKSource` says whether the flag
+       * or the perturbation supplied it. Printing the flag alone would misdescribe the `ev-bar-k*` rows.
+       */
+      perturbation: {
+        id: perturbation.id,
+        family: perturbation.family,
+        label: perturbation.label,
+        refit: perturbation.refit,
+        why: perturbation.why,
+      },
+      evBarSigmaK,
+      evBarSigmaKSource: perturbation.POLICY === POLICY ? 'flag' : 'perturbation',
+      /**
+       * The perturbed tables in full. Verbose on purpose: "margins -30%" is a label, and a label is
+       * not checkable. These three lines are what let someone recompute a row's arithmetic by hand.
+       */
+      costs: perturbation.COSTS,
+      margins: perturbation.CONTRIBUTION_MARGIN,
+      generatorOverrideKeys: Object.keys(perturbation.generatorOverrides),
     },
     arms: f.arms.map((id) => describeArm(id)),
     perWorld,
@@ -357,6 +492,20 @@ L.push('  REBOUND — FIVE-ARM PAIRED COMPARISON');
 L.push('  ============================================================================================');
 L.push(`  ${f.seeds.length} world(s) × ${f.count} cases on ${f.split} · ${f.cycles} cycles × ${f.stepHours}h = ${horizonDays} days · start ${startAt.toISOString()}`);
 L.push(`  seeds: ${f.seeds.join(', ')}`);
+/**
+ * PRINTED LOUDLY WHENEVER IT IS NOT THE BASELINE, above the money. A perturbed run produces a
+ * perfectly ordinary-looking table, and a reader who scrolls past a one-line footnote would quote a
+ * figure from an alternative world as though it were the headline. The baseline row stays silent so
+ * that the default output is unchanged.
+ */
+if (!perturbation.isBaseline) {
+  L.push('');
+  L.push('  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++');
+  L.push(`  PERTURBED WORLD: ${perturbation.id} — ${perturbation.label}`);
+  L.push(`  family: ${perturbation.family}   model refitted in the perturbed world: ${perturbation.refit ? 'YES' : 'NO (this row measures miscalibration, not sensitivity)'}`);
+  L.push('  These figures are NOT the headline. They belong to one row of the #58 sensitivity table.');
+  L.push('  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++');
+}
 L.push('');
 L.push('  SIMULATED RUPEES. This command measures THE POLICY IS BETTER, which is a claim about a');
 L.push('  simulation. THE PLUMBING WORKS is a separate claim, proven against the real Razorpay');

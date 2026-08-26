@@ -802,7 +802,101 @@ phantom recovery inflating the empirical side. What survives is within-cell mis-
 ---
 
 
-## 13. What is proven versus what is measured
+## 13. The assumption sensitivity sweep — does the ranking survive being wrong about the prices?
+
+Every price in this project is stated, not measured: `describe-sim` prints `measured: false` beside all
+of them. So the question that matters is not whether the numbers are right, but whether the **ranking**
+survives them being wrong.
+
+### Read it in one second, without re-running anything
+
+    npm run sweep-report
+
+Re-prints all 26 rows from the run committed under `docs/evidence/sweep-2026-08-26/rows/`. No
+computation, no waiting. Every sweep figure quoted in `ENGINEERING_LOG.md` comes from these files.
+
+### Or reproduce it from scratch — about 20 minutes
+
+    npm run sweep
+
+26 rows x (5 worlds x 80 held-out cases x 21 cycles). Two workers by default because the box has two
+cores; `--workers=4` on a bigger machine. Individual rows:
+
+    node src/eval/cli/sweep.js --list
+    node src/eval/cli/sweep.js --only=baseline,cause-mix-do-not-honour-x3
+
+### What to check, in this order
+
+**One: the control row must reproduce the headline.** If it does not, the sweep harness is changing the
+result by observing it and nothing below it can be read. Expect exactly:
+
+    baseline    3/5 signs    1.87x pooled incremental vs B3    +Rs 58,483 mean paired
+                1,379 actions (688 retries + 691 messages)     0.71x vs B2
+
+Those are the same four figures `npm run eval` prints. The `vsB2` column stays in the table on purpose:
+**the control LOSES that comparison**, and it is printed on all 26 rows so that a row which flips it
+cannot be quoted without the other 25 beside it.
+
+**Two: the row counts.** `Rows requested: 26. Completed: 26. Crashed: 0. With invariant defects: 0.` A
+crashed row prints FAILED and is excluded from the verdict counts *and* from their denominator —
+otherwise a broken sweep would report a better ratio than a working one.
+
+**Three: the verdict column.** Of the 25 non-control rows, 24 hold the primary verdict and **1 flips**:
+
+    cause-mix-do-not-honour-x3    2/5 signs, 1.75x    FLIP -> fails
+
+The verdict is fixed in a `VERDICT` constant at the top of `sweep.js` — >= 3 of 5 paired worlds AND a
+pooled ratio above 1, both required — written before any row ran and applied identically to every row
+including the control. Rows print in catalogue order and are never sorted by favourability.
+
+**Four: `NO-OP -- SUSPECT WIRING`.** This is the verdict that matters most and it should appear zero
+times. A perturbation that fails to reach the world prints the control's numbers under a perturbed row's
+name, and the honest-sounding reading of that row is "this assumption does not matter". Two rows,
+`channels-x0.7` and `channels-x1.3`, pre-register their null in the catalogue and print
+`no-op (PREDICTED)`; a test pins that list to exactly those two so no other row can be excused after the
+fact.
+
+**Five: the money-only nulls.** The findings section lists rows that changed what the agent *did* without
+changing what it recovered. Those are results, not nulls — `retry-penalty-x0` fires 100 more retries for
+the same rupees to the paise.
+
+### The two claims worth attacking
+
+The sweep's own headline finding is that **the failed-retry penalty does not drive the money.** Across
+the 15 rows that hold the world fixed and change only a price, Rebound's retries span 447-788 (a 1.76x
+range) while gross recovery spans ₹6,98,301-₹7,01,973 (0.53%). Retry success is 2.5-2.8% for every arm.
+The money comes from contacting the right customer, not from re-charging the card.
+
+And the assumption the conclusion actually rests on is **the cause mix**, not any price. Check that
+yourself with the pair:
+
+    node src/eval/cli/sweep.js --only=cause-mix-do-not-honour-x3,cause-mix-insufficient-funds-x3
+
+DO_NOT_HONOUR is the cause the diagnosis taxonomy handles worst and the ranking fails there;
+INSUFFICIENT_FUNDS is the cause where waiting is right and the ranking holds. Both refit the model on
+the tilted world, so neither is measuring staleness.
+
+### The row that answers a different question
+
+`stale-model` prints `RFT: N`. The world moves and the model keeps beliefs fitted in the baseline world,
+so it measures robustness to being **wrong** about the assumptions rather than sensitivity to their
+values. It shares `joint-1`'s rng seed, so the two are the same world differing in exactly one variable:
+
+    node src/eval/cli/sweep.js --only=joint-1,stale-model
+
+Read them as a pair or not at all. A flip in `stale-model` cannot be attributed, because the
+perturbation's effect and the size of the train/serve gap move together.
+
+### The number in this sweep I am asking you not to quote
+
+All three `joint-*` rows flip the vsB2 comparison from the control's 0.71x loss into a 1.08-1.11x win.
+That is a win found by searching 25 worlds, and the sweep prints it under its own heading saying so. If
+you want the honest version of the vsB2 comparison, it is in section 12: **on money alone, the
+rule-breaking baseline beats us, and what it costs to be that baseline is 2,836 quiet-hours messages.**
+
+---
+
+## 14. What is proven versus what is measured
 
 Two claims, never mixed, and the difference is the whole argument:
 
@@ -820,7 +914,7 @@ No command in this repo produces a number that mixes the two.
 
 ---
 
-## 14. Git history
+## 15. Git history
 
     git log --oneline
     git show --stat HEAD
