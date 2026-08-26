@@ -12,6 +12,7 @@
     "describe-sim": "node src/sim/cli/describe.js",
     "verify-sim": "node src/sim/cli/verify.js",
     "live-check": "node src/razorpay/cli/live-check.js",
+    "recover-live": "node src/razorpay/cli/recover-live.js",
     "doctor": "node src/razorpay/cli/doctor.js",
     "api": "node src/demo/cli/serve.js",
     "eval": "node src/eval/cli/run.js",
