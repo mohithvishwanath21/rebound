@@ -1,0 +1,157 @@
+{
+  "runId": "rec_mta0dr4j",
+  "at": "2026-08-26T11:26:48.720Z",
+  "keyIdPrefix": "rzp_test_***",
+  "mode": "LIVE_TEST",
+  "declinedPayment": "pay_TSpwzaqXioxWsk",
+  "diagnosis": {
+    "rootCause": "INSTRUMENT_NOT_ACCEPTED",
+    "source": "RULE",
+    "matchTier": "REASON",
+    "matchedOn": "reason=international_transaction_not_allowed",
+    "ruleIndex": 4,
+    "evidenceDate": "2026-08-22",
+    "abstained": false,
+    "requiresApprovalForMoneyMovement": false,
+    "physics": {
+      "fault": "MERCHANT",
+      "retryCanSucceed": false,
+      "timingSensitive": false,
+      "prefersSalaryWindow": false,
+      "automationAllowed": true,
+      "messagingAppropriate": true,
+      "railSwitchHelps": true,
+      "railSwitchIsPrimary": true,
+      "needsNewInstrument": false,
+      "requiresReauth": false,
+      "humanOnly": false
+    },
+    "observed": {
+      "code": "BAD_REQUEST_ERROR",
+      "reason": "international_transaction_not_allowed",
+      "errorSource": "business",
+      "step": "payment_initiation",
+      "textLength": 126
+    },
+    "explanation": "This merchant account does not accept the instrument the customer used — a foreign card on a domestic-only account, an unsupported network, a currency mismatch. The customer is willing and their card works fine elsewhere. Retrying the same rail is exactly zero. Offering a different rail is usually an immediate recovery."
+  },
+  "issuedLink": "plink_TUNhyYZ9j1S0nt",
+  "beats": [
+    {
+      "n": 1,
+      "of": 5,
+      "title": "THE FAILURE — what Razorpay actually returned",
+      "lines": [
+        "  payment            pay_TSpwzaqXioxWsk   ₹499   method=card",
+        "  status             failed",
+        "  error_code         BAD_REQUEST_ERROR",
+        "  error_reason       international_transaction_not_allowed",
+        "  description        \"Your payment could not be completed as this business accepts domestic (Indian) card payments only. Try another payment method.\"",
+        "  our ref            rbd_SL1_vecheck1_58a43c528f",
+        "     Those are Razorpay's fields, read from the account payments list — 2 declined payment(s)",
+        "     found among the last 54. Nothing below this line is written by hand; the next step feeds",
+        "     this exact payload into the diagnosis layer."
+      ]
+    },
+    {
+      "n": 2,
+      "of": 5,
+      "title": "THE DIAGNOSIS — what Rebound made of it",
+      "lines": [
+        "  root cause         INSTRUMENT_NOT_ACCEPTED  (Instrument or rail not accepted by this merchant)",
+        "  matched at         RULE / REASON tier, on reason=international_transaction_not_allowed",
+        "  evidence           pattern confirmed against the live API on 2026-08-22",
+        "  fault              MERCHANT",
+        "  physics            retryCanSucceed=false  railSwitchIsPrimary=true  messagingAppropriate=true",
+        "  abstained          false",
+        "     This merchant account does not accept the instrument the customer used — a foreign card on a",
+        "     domestic-only account, an unsupported network, a currency mismatch. The customer is willing",
+        "     and their card works fine elsewhere. Retrying the same rail is exactly zero. Offering a",
+        "     different rail is usually an immediate recovery.",
+        "     This is the only class in the taxonomy that was found rather than imagined. The twelve I",
+        "     wrote before touching the API did not cover this payload: it fell through every rule to",
+        "     UNKNOWN, which permits one cautious retry — so the considered answer to a decline that can",
+        "     never succeed was to try it again. The class, and the railSwitchIsPrimary flag that",
+        "     separates \"press a different button\" from \"go and find another card\", both exist because of",
+        "     this one real decline."
+      ]
+    },
+    {
+      "n": 3,
+      "of": 5,
+      "title": "THE PRICING — every action, in rupees",
+      "lines": [
+        "  RETRY_NOW          p = 0.00 (fixed by the cause)   EV = −₹2",
+        "     Not an estimate. international_transaction_not_allowed means this account cannot accept this",
+        "     instrument, so the retry is a cost with no upside — today, tomorrow, and on the third",
+        "     attempt a fixed ladder would also spend.",
+        "  SWITCH_RAIL_NUDGE  beats the retry at any p > 1.35%",
+        "     Deliberately quoted as a break-even rather than a point estimate. Putting a probability on a",
+        "     single live case would mean extrapolating from generated training data and presenting it as",
+        "     a measurement. The break-even says what would have to be true for this decision to be wrong,",
+        "     which is a claim the viewer can check. The calibrated probabilities live in the batch",
+        "     evaluation, where they were scored against held-out data.",
+        "",
+        "  \u001b[1mDECISION\u001b[0m \u001b[32mSWITCH_RAIL_NUDGE\u001b[0m — move the customer to a rail this account accepts."
+      ]
+    },
+    {
+      "n": 4,
+      "of": 5,
+      "title": "THE ACTION — a real link, on a rail that works",
+      "lines": [
+        "  link               plink_TUNhyYZ9j1S0nt",
+        "  url                https://rzp.io/rzp/DqlFBqH",
+        "  amount             ₹499",
+        "  methods            unrestricted — the payer chooses; the 22 Aug recovery arrived on netbanking",
+        "  caveat             upi_link requested, NOT applied",
+        "     UPI-only restriction (upi_link) requested but NOT applied: Razorpay supports UPI Payment",
+        "     Links in live mode only, confirmed by a 400 on 2026-08-26. The link carries no method",
+        "     restriction, so it offers whatever this account has enabled — the rail switch is still",
+        "     available to the payer, only the pre-selection is lost.",
+        "     Worth pausing on, because it is the most useful thing that has gone wrong on this project. A",
+        "     UPI-only link saves the customer a tap, so the gateway set that flag on every rail nudge and",
+        "     the whole test suite agreed it worked — the fake I test against accepted the flag because I",
+        "     am the one who wrote the fake. The real API returns \"UPI Payment Links is not supported in",
+        "     Test Mode\", and this account is test mode by construction, so that code path had never once",
+        "     worked. A fake encodes my own beliefs, which is precisely why it cannot falsify them; only a",
+        "     live call could. The decision itself is untouched: the declined card cannot be authorised at",
+        "     all, and this link puts no method restriction in the payer's way. What is lost is one tap,",
+        "     and what is gained is a receipt that says so.",
+        "  notify             sms=false email=false reminder_enable=false",
+        "     No message was sent to anybody. Razorpay would happily notify and re-remind on its own",
+        "     schedule, which would put contacts outside this project's own contact ledger and silently",
+        "     break the messaging cap the guardrails enforce — so reminders are disabled at creation.",
+        "",
+        "  \u001b[33m\u001b[1mYOUR TURN\u001b[0m\u001b[0m open that url and pay it with UPI id  \u001b[1msuccess@razorpay\u001b[0m",
+        "  \u001b[2mthen run\u001b[0m  npm run recover-live -- --confirm plink_TUNhyYZ9j1S0nt"
+      ]
+    }
+  ],
+  "httpCalls": [
+    {
+      "event": "http",
+      "method": "GET",
+      "path": "/payments",
+      "status": 200,
+      "attempt": 1,
+      "ms": 6279,
+      "requestId": null
+    },
+    {
+      "event": "http",
+      "method": "POST",
+      "path": "/payment_links",
+      "status": 200,
+      "attempt": 1,
+      "ms": 1107,
+      "requestId": null
+    },
+    {
+      "event": "channel_not_dispatched",
+      "channel": "WHATSAPP",
+      "reference": "rbd_SR1_a43c528f_66e93e3044",
+      "note": "link created and payable, notification not sent by Razorpay"
+    }
+  ]
+}

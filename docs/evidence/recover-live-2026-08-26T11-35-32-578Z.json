@@ -1,0 +1,40 @@
+{
+  "runId": "rec_mta0p4qw",
+  "at": "2026-08-26T11:35:32.577Z",
+  "keyIdPrefix": "rzp_test_***",
+  "mode": "LIVE_TEST",
+  "beats": [
+    {
+      "n": 5,
+      "of": 5,
+      "title": "THE RECOVERY — money that actually arrived",
+      "lines": [
+        "  link               plink_TUNhyYZ9j1S0nt",
+        "  status             paid",
+        "  amount_paid        ₹499 of ₹499",
+        "  reference          rbd_SR1_a43c528f_66e93e3044",
+        "  payment            pay_TUNqn3thLLX5Vp  method=netbanking  captured",
+        "     The payment that recovered the money is attached to the link entity. Declined attempts were",
+        "     not — they were only visible on the account payments list. That asymmetry is real provider",
+        "     behaviour, confirmed from both sides on 2026-08-22, and it is why the attempt history in",
+        "     this project never trusts the link alone.",
+        "",
+        "  \u001b[32m\u001b[1mRECOVERED\u001b[0m\u001b[0m ₹499 — on a rail this account accepts.",
+        "     The same rupee the card refused. Nothing about the customer changed, nothing about the",
+        "     amount changed, and no retry of the original instrument could have produced this. Only the",
+        "     rail changed."
+      ]
+    }
+  ],
+  "httpCalls": [
+    {
+      "event": "http",
+      "method": "GET",
+      "path": "/payment_links/plink_TUNhyYZ9j1S0nt",
+      "status": 200,
+      "attempt": 1,
+      "ms": 395,
+      "requestId": null
+    }
+  ]
+}

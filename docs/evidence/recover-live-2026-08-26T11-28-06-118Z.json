@@ -1,0 +1,31 @@
+{
+  "runId": "rec_mta0fk9x",
+  "at": "2026-08-26T11:28:06.117Z",
+  "keyIdPrefix": "rzp_test_***",
+  "mode": "LIVE_TEST",
+  "beats": [
+    {
+      "n": 5,
+      "of": 5,
+      "title": "THE RECOVERY — money that actually arrived",
+      "lines": [
+        "  link               plink_TUNhyYZ9j1S0nt",
+        "  status             created",
+        "  amount_paid        ₹0 of ₹499",
+        "  reference          rbd_SR1_a43c528f_66e93e3044",
+        "     Not paid yet. Open the link, pay with UPI id success@razorpay, then run this again."
+      ]
+    }
+  ],
+  "httpCalls": [
+    {
+      "event": "http",
+      "method": "GET",
+      "path": "/payment_links/plink_TUNhyYZ9j1S0nt",
+      "status": 200,
+      "attempt": 1,
+      "ms": 368,
+      "requestId": null
+    }
+  ]
+}
