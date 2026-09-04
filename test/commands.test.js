@@ -47,8 +47,13 @@ const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
  * The documents a stranger reads to learn what to type. ENGINEERING_LOG.md is deliberately absent: it is
  * a record of what happened, it narrates this very defect, and quoting the broken command is the point
  * of the entry. Editing history so a lint passes is the wrong direction of fit.
+ *
+ * `docs/from-the-video.md` is here because it is now the first file a reviewer opens — it is a table of
+ * commands and nothing else, which makes it the single most copy-pasted surface in the repo and the one
+ * least likely to be re-read after it is written. A doc that names commands and is guarded by no test is
+ * the Day 14 defect with a new filename.
  */
-const DOC_FILES = ['README.md', 'PITCH.md', 'docs/explaining-rebound.md'];
+const DOC_FILES = ['README.md', 'PITCH.md', 'docs/explaining-rebound.md', 'docs/from-the-video.md'];
 
 /**
  * The copyable part of a markdown file: fenced code blocks and table rows. Prose is excluded on purpose.

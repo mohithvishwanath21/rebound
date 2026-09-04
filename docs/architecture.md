@@ -161,6 +161,29 @@ early is biased twice in this project's favour, since cases in flight have had l
 frozen approvals are money the policy never spent. That is why the operator console — which pauses
 mid-horizon so a human can approve things — prints **no money figures at all**.
 
+## The console has two modes, and the difference is the honesty rule, not a preference
+
+`src/demo/cli/serve.js` serves the same read model in two configurations, and they look so unalike that
+opening the wrong one reads as a broken page rather than a different mode.
+
+`npm run api` runs the simulated approver. The batch has already reached its horizon before the browser
+loads, so the arm ledger and every money figure are final and the approval queue is empty — and the
+clock control deliberately **refuses** to advance, because moving the clock on a scored run would
+truncate it and invalidate the numbers already on screen. This is the mode where money may be quoted.
+
+`npm run console` runs `--approver=HUMAN`. It pauses mid-horizon with real pending approvals, so *Run to
+horizon* walks the remaining cycles one at a time, cases sit in `AWAITING_APPROVAL` until a named person
+signs, and **no money figure appears anywhere.** `approverKind` defaults to `SIM`, so the human mode is
+something you opt into rather than something you can arrive in by accident.
+
+The separation is enforced rather than encouraged: `scoreArm` refuses to score a hand-driven session at
+all. A paused run is a truncated run and is biased twice in this project's favour — cases in flight have
+had less time to fail, and frozen approvals are money the policy never spent. So the mode where a human
+can intervene is the mode that is structurally forbidden from reporting a result, and the two claims
+never share a screen. If you want to see the approval gate hold, press *Run to horizon* and sign
+nothing: the page prints how many cases stayed frozen and states that nothing was spent on them and
+nothing came back from them.
+
 ## Directory map
 
 | Path | What lives there |

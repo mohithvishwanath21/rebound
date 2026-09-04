@@ -177,6 +177,10 @@ close that loop by itself would be lying.
 
 ## Reading further
 
+**If you arrived here from the video,** [`docs/from-the-video.md`](docs/from-the-video.md) maps every
+claim you heard to the command that reproduces it and the file that computes it, in the order you heard
+them. It is a map, not a second source of truth — where it disagrees with the code, the code wins.
+
 [`VERIFY.md`](VERIFY.md) reproduces every claim above, command by command, and is the file to read if
 you want to attack the numbers. [`docs/architecture.md`](docs/architecture.md) is the module-by-module
 walkthrough. [`ENGINEERING_LOG.md`](ENGINEERING_LOG.md) is the running record of what broke, including
